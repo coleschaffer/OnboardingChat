@@ -12,6 +12,12 @@
     <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
 </head>
 <body>
+    <!-- Progress Bar - Fixed at top -->
+    <div class="progress-container">
+        <div class="progress-bar" id="progress-bar"></div>
+        <span class="progress-text" id="progress-text">0% Complete</span>
+    </div>
+
     <div class="container">
         <!-- Header Section -->
         <header class="header">
@@ -19,18 +25,12 @@
             <p class="header-subtitle">Please check your email after completing this chat for next steps.</p>
         </header>
 
-        <!-- Progress Bar -->
-        <div class="progress-container">
-            <div class="progress-bar" id="progress-bar"></div>
-            <span class="progress-text" id="progress-text">0% Complete</span>
-        </div>
-
         <!-- Chat Container -->
         <div class="chat-container" id="chat-container">
             <div class="chat-messages" id="chat-messages">
                 <!-- Messages will be inserted here -->
             </div>
-            <!-- Input Area (now inside chat container like iMessage) -->
+            <!-- Input Area -->
             <div class="input-area" id="input-area">
                 <!-- Dynamic input will be inserted here -->
             </div>

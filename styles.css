@@ -29,7 +29,7 @@ body {
 .container {
     max-width: 800px;
     margin: 0 auto;
-    padding: 20px;
+    padding: 70px 20px 20px 20px;
     min-height: 100vh;
     display: flex;
     flex-direction: column;
@@ -118,16 +118,19 @@ body {
     flex: 1;
 }
 
-/* Progress Bar */
+/* Progress Bar - Fixed at top */
 .progress-container {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
     background: var(--white);
-    border-radius: 12px;
-    padding: 16px 20px;
-    margin-bottom: 20px;
-    box-shadow: var(--shadow);
+    padding: 12px 20px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
     display: flex;
     align-items: center;
     gap: 16px;
+    z-index: 1000;
 }
 
 .progress-bar {
@@ -159,12 +162,10 @@ body {
     text-align: right;
 }
 
-/* Chat Container - iMessage Style */
+/* Chat Container - Frameless */
 .chat-container {
     flex: 1;
-    background: var(--white);
-    border-radius: 16px;
-    box-shadow: var(--shadow);
+    background: transparent;
     overflow: hidden;
     display: flex;
     flex-direction: column;
@@ -173,7 +174,7 @@ body {
 
 .chat-messages {
     flex: 1;
-    padding: 24px;
+    padding: 16px 0;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
@@ -267,11 +268,10 @@ body {
     30% { transform: translateY(-4px); }
 }
 
-/* Input Area - iMessage Style (inside chat container) */
+/* Input Area */
 .input-area {
     background: var(--bg-color);
-    padding: 16px 20px;
-    border-top: 1px solid var(--gray-light);
+    padding: 16px 0;
 }
 
 /* Text Input Row - iMessage style */
