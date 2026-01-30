@@ -36,20 +36,67 @@ router.post('/typeform', express.raw({ type: 'application/json' }), async (req, 
 
     const responseId = form_response.token;
     const answers = form_response.answers || [];
+    const definition = form_response.definition || {};
+    const fields = definition.fields || [];
 
-    // Map Typeform field IDs to our fields
-    // You'll need to update these field IDs based on your Typeform form
+    console.log('Typeform answers received:', JSON.stringify(answers, null, 2));
+
+    // Build a map of field ID to field title for better matching
+    const fieldTitleMap = {};
+    fields.forEach(f => {
+      fieldTitleMap[f.id] = f.title?.toLowerCase() || '';
+    });
+
+    // Extract answers by looking at field titles/types
     const fieldMapping = {
-      // Example mappings - update these with actual field IDs from your form
-      'first_name': findAnswer(answers, 'short_text', 0),
-      'last_name': findAnswer(answers, 'short_text', 1),
-      'email': findAnswer(answers, 'email', 0),
-      'phone': findAnswer(answers, 'phone_number', 0),
-      'business_description': findAnswer(answers, 'long_text', 0),
-      'annual_revenue': findChoice(answers, 'multiple_choice', 0),
-      'main_challenge': findAnswer(answers, 'long_text', 1),
-      'why_ca_pro': findAnswer(answers, 'long_text', 2)
+      first_name: null,
+      last_name: null,
+      email: null,
+      phone: null,
+      business_description: null,
+      annual_revenue: null,
+      main_challenge: null,
+      why_ca_pro: null
     };
+
+    // Process each answer and map to our fields
+    for (const answer of answers) {
+      const fieldId = answer.field?.id;
+      const fieldTitle = fieldTitleMap[fieldId] || '';
+      const value = extractAnswerValue(answer);
+
+      // Match by field type first
+      if (answer.type === 'email' && !fieldMapping.email) {
+        fieldMapping.email = value;
+      } else if (answer.type === 'phone_number' && !fieldMapping.phone) {
+        fieldMapping.phone = value;
+      }
+      // Then match by title keywords
+      else if (fieldTitle.includes('first') && fieldTitle.includes('name')) {
+        fieldMapping.first_name = value;
+      } else if (fieldTitle.includes('last') && fieldTitle.includes('name')) {
+        fieldMapping.last_name = value;
+      } else if ((fieldTitle.includes('full') && fieldTitle.includes('name')) || fieldTitle === 'name') {
+        // Split full name into first/last
+        const parts = (value || '').trim().split(/\s+/);
+        if (parts.length >= 2) {
+          fieldMapping.first_name = parts[0];
+          fieldMapping.last_name = parts.slice(1).join(' ');
+        } else {
+          fieldMapping.first_name = value;
+        }
+      } else if (fieldTitle.includes('business') || fieldTitle.includes('company') || fieldTitle.includes('describe')) {
+        fieldMapping.business_description = value;
+      } else if (fieldTitle.includes('revenue') || fieldTitle.includes('sales')) {
+        fieldMapping.annual_revenue = value;
+      } else if (fieldTitle.includes('challenge') || fieldTitle.includes('struggle') || fieldTitle.includes('problem')) {
+        fieldMapping.main_challenge = value;
+      } else if (fieldTitle.includes('why') || fieldTitle.includes('goal') || fieldTitle.includes('hope') || fieldTitle.includes('expect')) {
+        fieldMapping.why_ca_pro = value;
+      }
+    }
+
+    console.log('Parsed Typeform fields:', fieldMapping);
 
     // Check if response already exists
     const existing = await pool.query(
@@ -112,33 +159,38 @@ router.post('/typeform', express.raw({ type: 'application/json' }), async (req, 
   }
 });
 
-// Helper functions to extract answers from Typeform response
-function findAnswer(answers, type, index) {
-  const filtered = answers.filter(a => a.type === type);
-  if (filtered[index]) {
-    switch (type) {
-      case 'short_text':
-      case 'long_text':
-        return filtered[index].text;
-      case 'email':
-        return filtered[index].email;
-      case 'phone_number':
-        return filtered[index].phone_number;
-      case 'number':
-        return filtered[index].number;
-      default:
-        return filtered[index].text || null;
-    }
-  }
-  return null;
-}
+// Helper function to extract value from any Typeform answer type
+function extractAnswerValue(answer) {
+  if (!answer) return null;
 
-function findChoice(answers, type, index) {
-  const filtered = answers.filter(a => a.type === type);
-  if (filtered[index] && filtered[index].choice) {
-    return filtered[index].choice.label;
+  switch (answer.type) {
+    case 'text':
+    case 'short_text':
+    case 'long_text':
+      return answer.text;
+    case 'email':
+      return answer.email;
+    case 'phone_number':
+      return answer.phone_number;
+    case 'number':
+      return answer.number?.toString();
+    case 'boolean':
+      return answer.boolean ? 'Yes' : 'No';
+    case 'choice':
+      return answer.choice?.label || answer.choice?.other;
+    case 'choices':
+      return (answer.choices?.labels || []).join(', ');
+    case 'date':
+      return answer.date;
+    case 'url':
+      return answer.url;
+    case 'file_url':
+      return answer.file_url;
+    default:
+      // Try common properties
+      return answer.text || answer.email || answer.phone_number ||
+             answer.number?.toString() || answer.choice?.label || null;
   }
-  return null;
 }
 
 // Test endpoint for webhook
