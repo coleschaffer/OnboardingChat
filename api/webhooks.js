@@ -47,16 +47,23 @@ router.post('/typeform', express.raw({ type: 'application/json' }), async (req, 
       fieldTitleMap[f.id] = f.title?.toLowerCase() || '';
     });
 
-    // Extract answers by looking at field titles/types
+    // Extract answers by looking at field titles/types - ALL 15 QUESTIONS
     const fieldMapping = {
-      first_name: null,
-      last_name: null,
-      email: null,
-      phone: null,
-      business_description: null,
-      annual_revenue: null,
-      main_challenge: null,
-      why_ca_pro: null
+      first_name: null,           // Q1
+      last_name: null,            // Q2
+      email: null,                // Q3
+      phone: null,                // Q4
+      contact_preference: null,   // Q5: Best way to reach you
+      business_description: null, // Q6: Tell me about your business
+      annual_revenue: null,       // Q7: Current annual revenue
+      revenue_trend: null,        // Q8: In the last 3 months has your revenue
+      main_challenge: null,       // Q9: #1 thing holding you back
+      why_ca_pro: null,           // Q10: What specifically about CA Pro
+      investment_readiness: null, // Q11: Prepared to make this investment
+      decision_timeline: null,    // Q12: Timeline for making a decision
+      has_team: null,             // Q13: Do you have a team currently
+      anything_else: null,        // Q14: Anything else I should know
+      referral_source: null       // Q15: How did you hear about CA Pro
     };
 
     // Process each answer and map to our fields
@@ -71,45 +78,58 @@ router.post('/typeform', express.raw({ type: 'application/json' }), async (req, 
       } else if (answer.type === 'phone_number' && !fieldMapping.phone) {
         fieldMapping.phone = value;
       }
-      // Then match by title keywords (order matters - more specific matches first)
+      // Q1: First name
       else if (fieldTitle.includes('first') && fieldTitle.includes('name')) {
         fieldMapping.first_name = value;
-      } else if (fieldTitle.includes('last') && fieldTitle.includes('name')) {
-        fieldMapping.last_name = value;
-      } else if ((fieldTitle.includes('full') && fieldTitle.includes('name')) || fieldTitle === 'name') {
-        // Split full name into first/last
-        const parts = (value || '').trim().split(/\s+/);
-        if (parts.length >= 2) {
-          fieldMapping.first_name = parts[0];
-          fieldMapping.last_name = parts.slice(1).join(' ');
-        } else {
-          fieldMapping.first_name = value;
-        }
       }
-      // Revenue question (MC): "What's your current annual revenue?"
-      else if (fieldTitle.includes('revenue') || fieldTitle.includes('sales')) {
+      // Q2: Last name
+      else if (fieldTitle.includes('last') && fieldTitle.includes('name')) {
+        fieldMapping.last_name = value;
+      }
+      // Q5: Best way to reach you
+      else if (fieldTitle.includes('best way') || fieldTitle.includes('reach you')) {
+        fieldMapping.contact_preference = value;
+      }
+      // Q6: Tell me about your business
+      else if ((fieldTitle.includes('tell') && fieldTitle.includes('business')) ||
+               fieldTitle.includes('what do you sell') || fieldTitle.includes('who do you sell')) {
+        fieldMapping.business_description = value;
+      }
+      // Q7: Current annual revenue
+      else if (fieldTitle.includes('current') && fieldTitle.includes('revenue')) {
         fieldMapping.annual_revenue = value;
       }
-      // Main challenge (SA): "What's the #1 thing holding your business back from scaling right now?"
-      else if (fieldTitle.includes('holding') || fieldTitle.includes('scaling') ||
-               fieldTitle.includes('#1') || fieldTitle.includes('challenge') ||
-               fieldTitle.includes('struggle') || fieldTitle.includes('problem')) {
+      // Q8: Revenue trend (last 3 months)
+      else if (fieldTitle.includes('last 3 months') || fieldTitle.includes('revenue:')) {
+        fieldMapping.revenue_trend = value;
+      }
+      // Q9: Main challenge (#1 thing holding back)
+      else if (fieldTitle.includes('holding') || fieldTitle.includes('#1')) {
         fieldMapping.main_challenge = value;
       }
-      // Why CA Pro (SA): "what specifically about CA Pro made you want to apply?"
-      else if (fieldTitle.includes('ca pro') || fieldTitle.includes('made you want') ||
-               fieldTitle.includes('specifically') || fieldTitle.includes('apply') ||
-               fieldTitle.includes('why') || fieldTitle.includes('goal') ||
-               fieldTitle.includes('hope') || fieldTitle.includes('expect')) {
+      // Q10: Why CA Pro (what specifically made you want to apply)
+      else if (fieldTitle.includes('specifically') && fieldTitle.includes('ca pro')) {
         fieldMapping.why_ca_pro = value;
       }
-      // Business description (SA): "Tell me about your business. What do you sell..."
-      // Check this AFTER main_challenge to avoid matching "holding your business back"
-      else if ((fieldTitle.includes('tell') && fieldTitle.includes('business')) ||
-               fieldTitle.includes('what do you sell') || fieldTitle.includes('who do you sell') ||
-               (fieldTitle.includes('about') && fieldTitle.includes('business')) ||
-               fieldTitle.includes('company') || fieldTitle.includes('describe')) {
-        fieldMapping.business_description = value;
+      // Q11: Investment readiness ($5,000/month)
+      else if (fieldTitle.includes('investment') || fieldTitle.includes('$5,000') || fieldTitle.includes('prepared')) {
+        fieldMapping.investment_readiness = value;
+      }
+      // Q12: Decision timeline
+      else if (fieldTitle.includes('timeline') || fieldTitle.includes('decision')) {
+        fieldMapping.decision_timeline = value;
+      }
+      // Q13: Has team
+      else if (fieldTitle.includes('team currently') || fieldTitle.includes('have a team')) {
+        fieldMapping.has_team = value;
+      }
+      // Q14: Anything else
+      else if (fieldTitle.includes('anything else') || fieldTitle.includes('should know')) {
+        fieldMapping.anything_else = value;
+      }
+      // Q15: Referral source (how did you hear)
+      else if (fieldTitle.includes('how did you hear') || fieldTitle.includes('lastly')) {
+        fieldMapping.referral_source = value;
       }
     }
 
@@ -125,7 +145,7 @@ router.post('/typeform', express.raw({ type: 'application/json' }), async (req, 
       return res.status(200).json({ message: 'Response already processed' });
     }
 
-    // Insert new application
+    // Insert new application with all 15 fields
     const result = await pool.query(`
       INSERT INTO typeform_applications (
         typeform_response_id,
@@ -133,13 +153,20 @@ router.post('/typeform', express.raw({ type: 'application/json' }), async (req, 
         last_name,
         email,
         phone,
+        contact_preference,
         business_description,
         annual_revenue,
+        revenue_trend,
         main_challenge,
         why_ca_pro,
+        investment_readiness,
+        decision_timeline,
+        has_team,
+        anything_else,
+        referral_source,
         raw_data,
         status
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
       RETURNING id
     `, [
       responseId,
@@ -147,10 +174,17 @@ router.post('/typeform', express.raw({ type: 'application/json' }), async (req, 
       fieldMapping.last_name,
       fieldMapping.email,
       fieldMapping.phone,
+      fieldMapping.contact_preference,
       fieldMapping.business_description,
       fieldMapping.annual_revenue,
+      fieldMapping.revenue_trend,
       fieldMapping.main_challenge,
       fieldMapping.why_ca_pro,
+      fieldMapping.investment_readiness,
+      fieldMapping.decision_timeline,
+      fieldMapping.has_team,
+      fieldMapping.anything_else,
+      fieldMapping.referral_source,
       JSON.stringify(form_response),
       'new'
     ]);

@@ -332,37 +332,76 @@ async function loadApplications() {
 async function viewApplication(id) {
     try {
         const app = await fetchAPI(`/applications/${id}`);
-        openModal('Application Details', `
+        openModal('Typeform Application - All 15 Questions', `
+            <h4 style="color: var(--orange); margin-bottom: 12px; border-bottom: 1px solid var(--border); padding-bottom: 8px;">Contact Info (Q1-Q5)</h4>
             <div class="detail-row">
-                <span class="detail-label">Name</span>
+                <span class="detail-label">Q1-2: Name</span>
                 <span class="detail-value">${app.first_name || ''} ${app.last_name || ''}</span>
             </div>
             <div class="detail-row">
-                <span class="detail-label">Email</span>
+                <span class="detail-label">Q3: Email</span>
                 <span class="detail-value">${app.email || '-'}</span>
             </div>
             <div class="detail-row">
-                <span class="detail-label">Phone</span>
+                <span class="detail-label">Q4: Phone</span>
                 <span class="detail-value">${app.phone || '-'}</span>
             </div>
             <div class="detail-row">
-                <span class="detail-label">Annual Revenue</span>
-                <span class="detail-value">${app.annual_revenue || '-'}</span>
+                <span class="detail-label">Q5: Best Way to Reach</span>
+                <span class="detail-value">${app.contact_preference || '-'}</span>
             </div>
+
+            <h4 style="color: var(--orange); margin: 16px 0 12px 0; border-bottom: 1px solid var(--border); padding-bottom: 8px;">Business Info (Q6-Q8)</h4>
             <div class="detail-row">
-                <span class="detail-label">Business</span>
+                <span class="detail-label">Q6: Business Description</span>
                 <span class="detail-value">${app.business_description || '-'}</span>
             </div>
             <div class="detail-row">
-                <span class="detail-label">Main Challenge</span>
+                <span class="detail-label">Q7: Annual Revenue</span>
+                <span class="detail-value">${app.annual_revenue || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Q8: Revenue Trend (3 months)</span>
+                <span class="detail-value">${app.revenue_trend || '-'}</span>
+            </div>
+
+            <h4 style="color: var(--orange); margin: 16px 0 12px 0; border-bottom: 1px solid var(--border); padding-bottom: 8px;">Goals & Challenges (Q9-Q10)</h4>
+            <div class="detail-row">
+                <span class="detail-label">Q9: #1 Thing Holding Back</span>
                 <span class="detail-value">${app.main_challenge || '-'}</span>
             </div>
             <div class="detail-row">
-                <span class="detail-label">Why CA Pro</span>
+                <span class="detail-label">Q10: Why CA Pro</span>
                 <span class="detail-value">${app.why_ca_pro || '-'}</span>
             </div>
+
+            <h4 style="color: var(--orange); margin: 16px 0 12px 0; border-bottom: 1px solid var(--border); padding-bottom: 8px;">Readiness (Q11-Q13)</h4>
             <div class="detail-row">
-                <span class="detail-label">Status</span>
+                <span class="detail-label">Q11: Investment Readiness</span>
+                <span class="detail-value">${app.investment_readiness || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Q12: Decision Timeline</span>
+                <span class="detail-value">${app.decision_timeline || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Q13: Has Team</span>
+                <span class="detail-value">${app.has_team || '-'}</span>
+            </div>
+
+            <h4 style="color: var(--orange); margin: 16px 0 12px 0; border-bottom: 1px solid var(--border); padding-bottom: 8px;">Additional Info (Q14-Q15)</h4>
+            <div class="detail-row">
+                <span class="detail-label">Q14: Anything Else</span>
+                <span class="detail-value">${app.anything_else || app.additional_info || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Q15: How They Heard About CA Pro</span>
+                <span class="detail-value">${app.referral_source || '-'}</span>
+            </div>
+
+            <h4 style="color: var(--text-secondary); margin: 16px 0 12px 0; border-bottom: 1px solid var(--border); padding-bottom: 8px;">Status</h4>
+            <div class="detail-row">
+                <span class="detail-label">Application Status</span>
                 <span class="detail-value"><span class="status-badge ${app.status}">${app.status}</span></span>
             </div>
             <div class="detail-row">

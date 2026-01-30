@@ -97,6 +97,56 @@ async function runMigrations() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_samcart_orders_email ON samcart_orders(LOWER(email))`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_samcart_orders_samcart_id ON samcart_orders(samcart_order_id)`);
 
+    // Add missing typeform_applications columns for all 15 questions
+    await pool.query(`
+      DO $$
+      BEGIN
+        -- anything_else column (Q14)
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'typeform_applications' AND column_name = 'anything_else') THEN
+          ALTER TABLE typeform_applications ADD COLUMN anything_else TEXT;
+        END IF;
+        -- contact_preference (Q5)
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'typeform_applications' AND column_name = 'contact_preference') THEN
+          ALTER TABLE typeform_applications ADD COLUMN contact_preference VARCHAR(100);
+        END IF;
+        -- revenue_trend (Q8)
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'typeform_applications' AND column_name = 'revenue_trend') THEN
+          ALTER TABLE typeform_applications ADD COLUMN revenue_trend VARCHAR(100);
+        END IF;
+        -- investment_readiness (Q11)
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'typeform_applications' AND column_name = 'investment_readiness') THEN
+          ALTER TABLE typeform_applications ADD COLUMN investment_readiness VARCHAR(255);
+        END IF;
+        -- decision_timeline (Q12)
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'typeform_applications' AND column_name = 'decision_timeline') THEN
+          ALTER TABLE typeform_applications ADD COLUMN decision_timeline VARCHAR(100);
+        END IF;
+        -- referral_source (Q15)
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'typeform_applications' AND column_name = 'referral_source') THEN
+          ALTER TABLE typeform_applications ADD COLUMN referral_source VARCHAR(255);
+        END IF;
+      END $$
+    `);
+
+    // Change has_team from BOOLEAN to VARCHAR if needed
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'typeform_applications' AND column_name = 'has_team' AND data_type = 'boolean'
+        ) THEN
+          ALTER TABLE typeform_applications ALTER COLUMN has_team TYPE VARCHAR(255) USING CASE WHEN has_team THEN 'Yes' ELSE 'No' END;
+        END IF;
+      END $$
+    `);
+
     console.log('Database migrations completed');
   } catch (error) {
     console.error('Migration error:', error);

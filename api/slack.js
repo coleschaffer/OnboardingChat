@@ -115,17 +115,23 @@ async function editWelcomeMessage(originalMessage, editRequest, memberData = {})
 
     const prompt = `You are editing a welcome message for a CA Pro member.
 
-MEMBER INFORMATION (for context):
+MEMBER INFORMATION (all available context):
 - Name: ${fullName}
 - Business Name: ${memberData.businessName || 'Not provided'}
 - Business Description: ${memberData.typeformBusinessDescription || 'Not provided'}
 - Bio: ${memberData.bio || 'Not provided'}
+- Revenue Level: ${memberData.typeformAnnualRevenue || 'Not provided'}
+- Revenue Trend: ${memberData.typeformRevenueTrend || 'Not provided'}
+- Team Size: ${memberData.teamCount || 'Not provided'}
+- Has Team: ${memberData.typeformHasTeam || 'Not provided'}
+- Traffic Sources: ${memberData.trafficSources || 'Not provided'}
+- Main Challenge: ${memberData.typeformMainChallenge || 'Not provided'}
 - What they want to achieve: ${memberData.massiveWin || 'Not provided'}
 - Why they joined CA Pro: ${memberData.typeformWhyCaPro || 'Not provided'}
-- Main Challenge: ${memberData.typeformMainChallenge || 'Not provided'}
-- Team Count: ${memberData.teamCount || 'Not provided'}
-- Traffic Sources: ${memberData.trafficSources || 'Not provided'}
-- Revenue Level: ${memberData.typeformAnnualRevenue || 'Not provided'}
+- Investment Readiness: ${memberData.typeformInvestmentReadiness || 'Not provided'}
+- Decision Timeline: ${memberData.typeformDecisionTimeline || 'Not provided'}
+- Additional Info: ${memberData.typeformAnythingElse || 'Not provided'}
+- Referral Source: ${memberData.typeformReferralSource || 'Not provided'}
 
 CURRENT WELCOME MESSAGE:
 "${originalMessage}"

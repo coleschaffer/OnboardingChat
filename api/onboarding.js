@@ -108,7 +108,7 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
     }
   }
 
-  // Build member data from chat answers AND Typeform data
+  // Build member data from chat answers AND Typeform data (all 15 questions)
   const memberData = {
     // Prefer Typeform data for name (since chat doesn't collect it)
     firstName: typeformData?.first_name || answers.firstName || '',
@@ -124,11 +124,18 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
     landingPages: answers.landingPages || '',
     aiSkillLevel: answers.aiSkillLevel || '',
     bio: answers.bio || '',
-    // Typeform-specific fields
+    // Typeform-specific fields (all 15 questions)
     typeformBusinessDescription: typeformData?.business_description || '',
     typeformAnnualRevenue: typeformData?.annual_revenue || '',
+    typeformRevenueTrend: typeformData?.revenue_trend || '',
     typeformMainChallenge: typeformData?.main_challenge || '',
-    typeformWhyCaPro: typeformData?.why_ca_pro || ''
+    typeformWhyCaPro: typeformData?.why_ca_pro || '',
+    typeformContactPreference: typeformData?.contact_preference || '',
+    typeformInvestmentReadiness: typeformData?.investment_readiness || '',
+    typeformDecisionTimeline: typeformData?.decision_timeline || '',
+    typeformHasTeam: typeformData?.has_team || '',
+    typeformAnythingElse: typeformData?.anything_else || typeformData?.additional_info || '',
+    typeformReferralSource: typeformData?.referral_source || ''
   };
 
   console.log('Sending Slack welcome for:', memberData.businessName);
@@ -213,26 +220,42 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
   const threadTs = parentResult.ts;
   await new Promise(resolve => setTimeout(resolve, 300));
 
-  // Thread message 1: Typeform Application Data (if available)
+  // Thread message 1: Typeform Application Data (if available) - All 15 Questions
   if (typeformData) {
     const typeformFields = [
-      `*Name:* ${fullName || 'N/A'}`,
-      `*Email:* ${memberData.email || 'N/A'}`,
-      `*Phone:* ${memberData.phone || 'N/A'}`,
-      `*Business Description:* ${memberData.typeformBusinessDescription || 'N/A'}`,
-      `*Annual Revenue:* ${memberData.typeformAnnualRevenue || 'N/A'}`,
-      `*Main Challenge:* ${memberData.typeformMainChallenge || 'N/A'}`,
-      `*Why CA Pro:* ${memberData.typeformWhyCaPro || 'N/A'}`
+      `*--- Contact Info ---*`,
+      `*Q1-2 Name:* ${[typeformData.first_name, typeformData.last_name].filter(Boolean).join(' ') || 'N/A'}`,
+      `*Q3 Email:* ${typeformData.email || 'N/A'}`,
+      `*Q4 Phone:* ${typeformData.phone || 'N/A'}`,
+      `*Q5 Best Way to Reach:* ${typeformData.contact_preference || 'N/A'}`,
+      ``,
+      `*--- Business Info ---*`,
+      `*Q6 Business:* ${typeformData.business_description || 'N/A'}`,
+      `*Q7 Annual Revenue:* ${typeformData.annual_revenue || 'N/A'}`,
+      `*Q8 Revenue Trend:* ${typeformData.revenue_trend || 'N/A'}`,
+      ``,
+      `*--- Goals & Challenges ---*`,
+      `*Q9 #1 Challenge:* ${typeformData.main_challenge || 'N/A'}`,
+      `*Q10 Why CA Pro:* ${typeformData.why_ca_pro || 'N/A'}`,
+      ``,
+      `*--- Readiness ---*`,
+      `*Q11 Investment Ready:* ${typeformData.investment_readiness || 'N/A'}`,
+      `*Q12 Timeline:* ${typeformData.decision_timeline || 'N/A'}`,
+      `*Q13 Has Team:* ${typeformData.has_team || 'N/A'}`,
+      ``,
+      `*--- Additional ---*`,
+      `*Q14 Anything Else:* ${typeformData.anything_else || typeformData.additional_info || 'N/A'}`,
+      `*Q15 Referral Source:* ${typeformData.referral_source || 'N/A'}`
     ];
 
     await sendMessage([
       {
         type: 'header',
-        text: { type: 'plain_text', text: `📝 Typeform Application`, emoji: true }
+        text: { type: 'plain_text', text: `📝 Typeform Application (All 15 Questions)`, emoji: true }
       },
       {
         type: 'section',
-        text: { type: 'mrkdwn', text: typeformFields.join('\n\n') }
+        text: { type: 'mrkdwn', text: typeformFields.join('\n') }
       }
     ], `Typeform data for ${memberName}`, threadTs);
 
@@ -382,17 +405,34 @@ async function generateWelcomeMessage(memberData) {
 
   const prompt = `You are writing a welcome message for a new CA Pro member to be posted in a WhatsApp group.
 
-Here is the member's information:
+Here is ALL the member's information from their application:
+
+CONTACT INFO:
 - Name: ${fullName || 'Not provided'}
+- Contact Preference: ${memberData.typeformContactPreference || 'Not provided'}
+
+BUSINESS INFO:
 - Business Name: ${memberData.businessName || 'Not provided'}
-- Business Description (from application): ${memberData.typeformBusinessDescription || 'Not provided'}
+- Business Description: ${memberData.typeformBusinessDescription || 'Not provided'}
 - About them/Bio: ${memberData.businessOverview || memberData.bio || 'Not provided'}
+- Revenue Level: ${generalizedRevenue || 'Not provided'}
+- Revenue Trend: ${memberData.typeformRevenueTrend || 'Not provided'}
+- Team Size: ${memberData.teamCount || 'Not provided'}
+- Has Team: ${memberData.typeformHasTeam || 'Not provided'}
+- Traffic Sources: ${memberData.trafficSources || 'Not provided'}
+
+GOALS & CHALLENGES:
+- Main Challenge (#1 thing holding them back): ${memberData.typeformMainChallenge || 'Not provided'}
 - What they want to achieve (massive win): ${memberData.massiveWin || 'Not provided'}
 - Why they joined CA Pro: ${memberData.typeformWhyCaPro || 'Not provided'}
-- Main Challenge: ${memberData.typeformMainChallenge || 'Not provided'}
-- Team Count: ${memberData.teamCount || 'Not provided'}
-- Traffic Sources: ${memberData.trafficSources || 'Not provided'}
-- Revenue Level: ${generalizedRevenue || 'Not provided'}
+
+READINESS:
+- Investment Readiness: ${memberData.typeformInvestmentReadiness || 'Not provided'}
+- Decision Timeline: ${memberData.typeformDecisionTimeline || 'Not provided'}
+
+ADDITIONAL:
+- Anything else they shared: ${memberData.typeformAnythingElse || 'Not provided'}
+- How they heard about CA Pro: ${memberData.typeformReferralSource || 'Not provided'}
 
 IMPORTANT RULES:
 1. NEVER include specific revenue numbers or dollar amounts. Only use general terms like "7 figures", "8 figures", "growing revenue", etc.
