@@ -1,13 +1,42 @@
 // CA Pro Onboarding Chat Interface
 
+const STORAGE_KEY = 'ca_pro_onboarding';
+
 // Generate or retrieve session ID
 function getSessionId() {
-    let sessionId = sessionStorage.getItem('onboarding_session_id');
-    if (!sessionId) {
-        sessionId = 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-        sessionStorage.setItem('onboarding_session_id', sessionId);
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+        const data = JSON.parse(saved);
+        if (data.sessionId) return data.sessionId;
     }
-    return sessionId;
+    return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+// Load saved progress from localStorage
+function loadSavedProgress() {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+        try {
+            return JSON.parse(saved);
+        } catch (e) {
+            console.error('Error loading saved progress:', e);
+        }
+    }
+    return null;
+}
+
+// Save progress to localStorage
+function saveLocalProgress() {
+    const data = {
+        sessionId: state.sessionId,
+        currentQuestion: state.currentQuestion,
+        answers: state.answers,
+        teamMembers: state.teamMembers,
+        cLevelPartners: state.cLevelPartners,
+        hasTeamMembers: state.hasTeamMembers,
+        isComplete: state.isComplete || false
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
 }
 
 // State Management
@@ -19,7 +48,8 @@ const state = {
     cLevelPartners: [],
     isTyping: false,
     isSaving: false,
-    hasTeamMembers: null // Will be set by AI validation
+    hasTeamMembers: null,
+    isComplete: false
 };
 
 // Questions Configuration
@@ -126,6 +156,10 @@ const questions = [
 
 // Save progress to backend (called after each question)
 async function saveProgress(isComplete = false) {
+    // Always save locally first
+    if (isComplete) state.isComplete = true;
+    saveLocalProgress();
+
     if (state.isSaving) return;
     state.isSaving = true;
 
@@ -203,19 +237,132 @@ function launchConfetti() {
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
-    // Launch confetti on page load
-    launchConfetti();
+    const savedProgress = loadSavedProgress();
 
-    // Show welcome message then first question
+    // Check if already completed
+    if (savedProgress && savedProgress.isComplete) {
+        // Restore state
+        state.sessionId = savedProgress.sessionId;
+        state.answers = savedProgress.answers || {};
+        state.teamMembers = savedProgress.teamMembers || [];
+        state.cLevelPartners = savedProgress.cLevelPartners || [];
+        state.isComplete = true;
+
+        // Show completion screen directly
+        showCompletionScreen();
+        launchConfetti();
+        return;
+    }
+
+    // Check if there's saved progress to resume
+    if (savedProgress && savedProgress.currentQuestion > 0) {
+        // Restore state
+        state.sessionId = savedProgress.sessionId;
+        state.currentQuestion = savedProgress.currentQuestion;
+        state.answers = savedProgress.answers || {};
+        state.teamMembers = savedProgress.teamMembers || [];
+        state.cLevelPartners = savedProgress.cLevelPartners || [];
+        state.hasTeamMembers = savedProgress.hasTeamMembers;
+
+        // Show welcome back message and resume
+        launchConfetti();
+        showTyping();
+        setTimeout(() => {
+            addBotMessage("Welcome back! 👋 Let's pick up where you left off.");
+            setTimeout(() => {
+                // Replay previous answers as chat messages
+                replayPreviousAnswers();
+                // Then show current question
+                showQuestion(state.currentQuestion);
+            }, 400);
+        }, 500);
+        return;
+    }
+
+    // Fresh start
+    launchConfetti();
     showTyping();
     setTimeout(() => {
         addBotMessage("Hey there! 👋 I'm here to help you complete your CA Pro onboarding. Let's get you set up!");
-        // Brief pause then show first question
         setTimeout(() => {
             showQuestion(0);
         }, 400);
     }, 500);
 });
+
+// Replay previous Q&A for returning users
+function replayPreviousAnswers() {
+    for (let i = 0; i < state.currentQuestion; i++) {
+        const question = questions[i];
+        if (!question) continue;
+
+        // Skip questions that were skipped due to logic (like teamMembers when no team)
+        if (question.id === 'teamMembers' && state.answers.teamCount) {
+            const tc = (state.answers.teamCount || '').toLowerCase().trim();
+            if (tc === '0' || tc === 'zero' || tc === 'none' || tc === 'no') continue;
+        }
+
+        // Add bot question
+        const msgDiv = document.createElement('div');
+        msgDiv.className = 'message message-bot';
+        msgDiv.innerHTML = `<div class="message-content">${question.message.replace(/\n/g, '<br>')}</div>`;
+        chatMessages.appendChild(msgDiv);
+
+        // Add user answer
+        const answer = state.answers[question.id];
+        let displayAnswer = '';
+
+        if (Array.isArray(answer)) {
+            // Team members or partners
+            if (answer.length > 0) {
+                displayAnswer = answer.map(m => m.name).join(', ');
+            } else {
+                displayAnswer = 'Skipped';
+            }
+        } else if (answer !== undefined && answer !== null) {
+            displayAnswer = String(answer);
+        } else {
+            displayAnswer = 'Skipped';
+        }
+
+        const userDiv = document.createElement('div');
+        userDiv.className = 'message message-user';
+        userDiv.innerHTML = `<div class="message-content">${displayAnswer}</div>`;
+        chatMessages.appendChild(userDiv);
+    }
+
+    updateProgress();
+    scrollToBottom();
+}
+
+// Show completion screen (without animation, for returning completed users)
+function showCompletionScreen() {
+    document.querySelector('.progress-container').style.display = 'none';
+    document.querySelector('.header').style.display = 'none';
+
+    chatMessages.innerHTML = `
+        <div class="completion-container">
+            <div class="completion-icon">✓</div>
+            <h2 class="completion-title">You're in!</h2>
+            <p class="completion-message">
+                We can't wait to help you grow your business.
+            </p>
+            <div class="completion-checklist">
+                <h3>What Happens Next:</h3>
+                <ul>
+                    <li>Check your email for welcome materials and login info</li>
+                    <li>Your team members will receive their own onboarding emails</li>
+                    <li>Connect with the community in WhatsApp</li>
+                </ul>
+            </div>
+            <p class="completion-message">
+                Questions? Reply to any of our emails or reach out in WhatsApp.
+            </p>
+        </div>
+    `;
+
+    inputArea.innerHTML = '';
+}
 
 // Progress Update
 function updateProgress() {
@@ -822,11 +969,8 @@ async function showCompletion() {
     // Clear input area immediately
     inputArea.innerHTML = '';
 
-    // Save final data with isComplete=true
+    // Save final data with isComplete=true (keeps in localStorage for returning users)
     await saveProgress(true);
-
-    // Clear session after completion
-    sessionStorage.removeItem('onboarding_session_id');
 
     // Hide progress bar and header
     document.querySelector('.progress-container').style.display = 'none';
