@@ -1,22 +1,29 @@
 // CA Pro Onboarding Chat Interface
 
+// Generate or retrieve session ID
+function getSessionId() {
+    let sessionId = sessionStorage.getItem('onboarding_session_id');
+    if (!sessionId) {
+        sessionId = 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        sessionStorage.setItem('onboarding_session_id', sessionId);
+    }
+    return sessionId;
+}
+
 // State Management
 const state = {
+    sessionId: getSessionId(),
     currentQuestion: 0,
     answers: {},
     teamMembers: [],
     cLevelPartners: [],
-    isTyping: false
+    isTyping: false,
+    isSaving: false,
+    hasTeamMembers: null // Will be set by AI validation
 };
 
 // Questions Configuration
 const questions = [
-    {
-        id: 'welcome',
-        type: 'welcome',
-        message: "Hey there! 👋 I'm here to help you complete your CA Pro onboarding. We already have some info from your application - let's fill in the rest so we can get you fully set up!",
-        buttonText: "Let's Get Started"
-    },
     {
         id: 'businessName',
         type: 'text',
@@ -27,29 +34,29 @@ const questions = [
     {
         id: 'teamCount',
         type: 'text',
-        message: "How many team members do you currently have, and want inside CA Pro?",
-        placeholder: "5 team members",
+        message: "How many team members do you currently have?",
+        placeholder: "1",
         validation: { required: true }
     },
     {
         id: 'trafficSources',
         type: 'textarea',
         message: "What traffic sources do you typically use to acquire customers?",
-        placeholder: "Facebook Ads, Google Ads, Email Marketing, Influencer partnerships, Organic social...",
+        placeholder: "e.g. Facebook Ads, Google Ads, Email...",
         validation: { required: true }
     },
     {
         id: 'landingPages',
         type: 'textarea',
         message: "Please share links to your landing pages, product pages, or any ads/creative assets. The more we see, the better we can help!",
-        placeholder: "Paste URLs here, one per line...",
+        placeholder: "Paste URLs here...",
         validation: { required: true }
     },
     {
         id: 'massiveWin',
         type: 'textarea',
         message: "What's the #1 thing that, if CA Pro helped you achieve, would be a MASSIVE win for your business?",
-        placeholder: "Be specific - this helps us tailor our support to your goals...",
+        placeholder: "Be specific...",
         validation: { required: true }
     },
     {
@@ -64,8 +71,8 @@ const questions = [
     {
         id: 'teamMembers',
         type: 'teamEntry',
-        message: "Let's set up your team access! Who should be added to the Training Group? They'll get access to weekly trainings, the member's area, and all past courses. You can add as many team members as you'd like.",
-        fields: ['firstName', 'lastName', 'email', 'phone', 'role'],
+        message: "Let's set up your team access! They'll get access to weekly trainings, the member's area, and all past courses. You can add as many team members as you'd like. Who should be added?",
+        fields: ['name', 'email', 'phone'],
         addButtonText: '+ Add Team Member',
         optional: true
     },
@@ -73,7 +80,7 @@ const questions = [
         id: 'cLevelPartners',
         type: 'partnerEntry',
         message: "Any C-Level executives or business partners you'd like added to the Business Owner WhatsApp group? They'll get access to owner-level discussions and the member's area.",
-        fields: ['firstName', 'lastName', 'email', 'phone'],
+        fields: ['name', 'email', 'phone'],
         addButtonText: '+ Add Partner',
         optional: true
     },
@@ -81,21 +88,14 @@ const questions = [
         id: 'bio',
         type: 'textarea',
         message: "Share a quick bio about yourself for our member directory. This helps other business owners and their teams get to know you!",
-        placeholder: "A few sentences about your background, expertise, and what you're working on...",
+        placeholder: "A few sentences about you...",
         validation: { required: true }
     },
     {
         id: 'headshotLink',
         type: 'text',
-        message: "Please share a link to a headshot or professional photo for your directory profile. You can submit a social media link if you don't have this.",
-        placeholder: "https://drive.google.com/... or social media profile link",
-        validation: { required: true }
-    },
-    {
-        id: 'whatsappNumber',
-        type: 'text',
-        message: "What's your WhatsApp number? We'll use this to identify you when you join the community.",
-        placeholder: "+1 (555) 123-4567",
+        message: "Please share a link to a headshot or professional photo for your directory profile. A social media link is also fine.",
+        placeholder: "Paste link here...",
         validation: { required: true }
     },
     {
@@ -106,15 +106,50 @@ const questions = [
             { value: 'done', label: "Yes, I've joined!" },
             { value: 'later', label: "I'll do it later" }
         ]
-    },
-    {
-        id: 'anythingElse',
-        type: 'textarea',
-        message: "Last one! Is there anything else you'd like us to know about you or your business?",
-        placeholder: "Optional - share anything that might help us serve you better...",
-        optional: true
     }
 ];
+
+// Save progress to backend (called after each question)
+async function saveProgress(isComplete = false) {
+    if (state.isSaving) return;
+    state.isSaving = true;
+
+    try {
+        // Add the last question ID to answers for tracking
+        const currentQ = questions[state.currentQuestion];
+        const answersWithTracking = {
+            ...state.answers,
+            lastQuestionId: currentQ ? currentQ.id : 'completed'
+        };
+
+        const response = await fetch('/api/onboarding/save-progress', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                sessionId: state.sessionId,
+                answers: answersWithTracking,
+                teamMembers: state.teamMembers,
+                cLevelPartners: state.cLevelPartners,
+                currentQuestion: state.currentQuestion,
+                totalQuestions: questions.length,
+                isComplete
+            })
+        });
+
+        if (!response.ok) {
+            console.error('Failed to save progress');
+        } else {
+            const result = await response.json();
+            console.log('Progress saved:', result.progress + '%', isComplete ? '(COMPLETE)' : '');
+        }
+    } catch (error) {
+        console.error('Error saving progress:', error);
+    } finally {
+        state.isSaving = false;
+    }
+}
 
 // DOM Elements
 const chatMessages = document.getElementById('chat-messages');
@@ -155,12 +190,14 @@ function launchConfetti() {
 document.addEventListener('DOMContentLoaded', () => {
     // Launch confetti on page load
     launchConfetti();
+
+    // Start directly with first question (no separate welcome message)
     showQuestion(0);
 });
 
 // Progress Update
 function updateProgress() {
-    const progress = Math.round((state.currentQuestion / (questions.length - 1)) * 100);
+    const progress = Math.round((state.currentQuestion / questions.length) * 100);
     progressBar.style.setProperty('--progress', `${progress}%`);
     progressText.textContent = `${progress}% Complete`;
 }
@@ -206,9 +243,65 @@ function addUserMessage(text) {
     scrollToBottom();
 }
 
-// Scroll to Bottom
+// Scroll to Bottom - improved to ensure input is visible
 function scrollToBottom() {
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+    // Use requestAnimationFrame to ensure DOM has updated
+    requestAnimationFrame(() => {
+        // Scroll the chat messages container
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+        // Also scroll the input area into view
+        inputArea.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    });
+}
+
+// Check if team count indicates zero team members
+function hasZeroTeamMembers() {
+    // If AI validation completed, use that result
+    if (state.hasTeamMembers !== null) {
+        return !state.hasTeamMembers;
+    }
+
+    // Fallback to simple logic if AI hasn't responded yet
+    const teamCount = (state.answers.teamCount || '').toLowerCase().trim();
+
+    // Empty means skip
+    if (teamCount === '') return true;
+
+    // Exact matches for zero
+    const exactZeroPatterns = ['0', 'zero', 'none', 'no', 'nope', 'n/a', 'na'];
+    if (exactZeroPatterns.includes(teamCount)) return true;
+
+    // Phrase patterns (must be the whole response or clearly indicate zero)
+    const phrasePatterns = ['no team', 'just me', 'only me', 'myself', 'no one', 'nobody', 'i don\'t', 'i dont', 'don\'t have', 'dont have'];
+    if (phrasePatterns.some(pattern => teamCount.includes(pattern))) return true;
+
+    // If the response starts with a number > 0 or contains positive indicators, show the question
+    const startsWithPositiveNumber = /^[1-9]/.test(teamCount);
+    const hasPositiveWords = ['over', 'about', 'around', 'several', 'few', 'many', 'some', 'multiple', 'team', 'people', 'employees', 'staff'].some(word => teamCount.includes(word));
+
+    if (startsWithPositiveNumber || hasPositiveWords) return false;
+
+    // Default: show the team question (don't skip)
+    return false;
+}
+
+// AI validation for team count (runs in background)
+async function validateTeamCountWithAI(teamCountResponse) {
+    try {
+        const response = await fetch('/api/validate-team-count', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ teamCount: teamCountResponse })
+        });
+
+        if (response.ok) {
+            const result = await response.json();
+            state.hasTeamMembers = result.hasTeamMembers;
+            console.log('AI validation result:', result.hasTeamMembers ? 'Has team members' : 'No team members');
+        }
+    } catch (error) {
+        console.error('AI validation failed, using fallback:', error);
+    }
 }
 
 // Show Question
@@ -219,17 +312,26 @@ function showQuestion(index) {
     }
 
     const question = questions[index];
+
+    // Skip team members question if team count is zero
+    if (question.id === 'teamMembers' && hasZeroTeamMembers()) {
+        state.currentQuestion = index + 1;
+        showQuestion(state.currentQuestion);
+        return;
+    }
+
     state.currentQuestion = index;
     updateProgress();
 
     // Show typing indicator
     showTyping();
 
-    // Simulate typing delay
+    // Brief typing delay (just enough to feel natural)
     setTimeout(() => {
         addBotMessage(question.message);
         renderInput(question);
-    }, 800);
+        scrollToBottom();
+    }, 400);
 }
 
 // Render Input Based on Type
@@ -237,9 +339,6 @@ function renderInput(question) {
     inputArea.innerHTML = '';
 
     switch (question.type) {
-        case 'welcome':
-            renderWelcomeInput(question);
-            break;
         case 'text':
             renderTextInput(question);
             break;
@@ -259,23 +358,8 @@ function renderInput(question) {
             renderPartnerEntryInput(question);
             break;
     }
-}
 
-// Welcome Input
-function renderWelcomeInput(question) {
-    inputArea.innerHTML = `
-        <button class="submit-btn" onclick="handleWelcome()">
-            ${question.buttonText}
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M5 12h14M12 5l7 7-7 7"/>
-            </svg>
-        </button>
-    `;
-}
-
-function handleWelcome() {
-    state.currentQuestion++;
-    showQuestion(state.currentQuestion);
+    scrollToBottom();
 }
 
 // Text Input - iMessage style
@@ -286,8 +370,8 @@ function renderTextInput(question) {
                 placeholder="${question.placeholder || ''}"
                 onkeypress="if(event.key === 'Enter') handleTextSubmit('${question.id}')">
             <button class="send-btn" onclick="handleTextSubmit('${question.id}')">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8-8-8z" transform="rotate(-90 12 12)"/>
                 </svg>
             </button>
         </div>
@@ -304,28 +388,45 @@ function handleTextSubmit(questionId) {
         return;
     }
 
+    // Clear input area immediately
+    inputArea.innerHTML = '';
+
     addUserMessage(value || 'Skipped');
     state.answers[questionId] = value;
+
+    // Trigger AI validation for team count (runs in background)
+    if (questionId === 'teamCount') {
+        validateTeamCountWithAI(value);
+    }
+
     state.currentQuestion++;
+    saveProgress(); // Save progress after each answer
     showQuestion(state.currentQuestion);
 }
 
-// Textarea Input - iMessage style
+// Textarea Input - iMessage style with auto-expand
 function renderTextareaInput(question) {
     inputArea.innerHTML = `
         <div class="input-row-imessage">
-            <textarea class="text-input" id="textarea-input"
+            <textarea class="text-input auto-expand" id="textarea-input"
                 placeholder="${question.placeholder || ''}"
-                rows="2"
-                onkeydown="if(event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); handleTextareaSubmit('${question.id}', ${question.optional || false}); }"></textarea>
+                rows="1"
+                onkeydown="if(event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); handleTextareaSubmit('${question.id}', ${question.optional || false}); }"
+                oninput="autoExpand(this)"></textarea>
             <button class="send-btn" onclick="handleTextareaSubmit('${question.id}', ${question.optional || false})">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8-8-8z" transform="rotate(-90 12 12)"/>
                 </svg>
             </button>
         </div>
     `;
     document.getElementById('textarea-input').focus();
+}
+
+// Auto-expand textarea as user types
+function autoExpand(textarea) {
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight, 150) + 'px';
 }
 
 function handleTextareaSubmit(questionId, optional) {
@@ -337,16 +438,20 @@ function handleTextareaSubmit(questionId, optional) {
         return;
     }
 
+    // Clear input area immediately
+    inputArea.innerHTML = '';
+
     addUserMessage(value || 'Skipped');
     state.answers[questionId] = value;
     state.currentQuestion++;
+    saveProgress(); // Save progress after each answer
     showQuestion(state.currentQuestion);
 }
 
 // Buttons Input
 function renderButtonsInput(question) {
-    const buttonsHtml = question.options.map(opt =>
-        `<button class="option-btn" onclick="handleButtonSelect('${question.id}', '${opt.value}', '${opt.label}')">${opt.label}</button>`
+    const buttonsHtml = question.options.map((opt, index) =>
+        `<button class="option-btn" data-index="${index}">${opt.label}</button>`
     ).join('');
 
     inputArea.innerHTML = `
@@ -354,12 +459,24 @@ function renderButtonsInput(question) {
             ${buttonsHtml}
         </div>
     `;
+
+    // Add click handlers (avoids issues with apostrophes in labels)
+    document.querySelectorAll('.option-btn').forEach((btn, index) => {
+        btn.addEventListener('click', () => {
+            const opt = question.options[index];
+            handleButtonSelect(question.id, opt.value, opt.label);
+        });
+    });
 }
 
 function handleButtonSelect(questionId, value, label) {
+    // Clear input area immediately
+    inputArea.innerHTML = '';
+
     addUserMessage(label);
     state.answers[questionId] = value;
     state.currentQuestion++;
+    saveProgress(); // Save progress after each answer
     showQuestion(state.currentQuestion);
 }
 
@@ -368,9 +485,11 @@ function renderSliderInput(question) {
     inputArea.innerHTML = `
         <div class="slider-container">
             <div class="slider-value" id="slider-value">${question.defaultValue}</div>
-            <input type="range" class="slider-input" id="slider-input"
-                min="${question.min}" max="${question.max}" value="${question.defaultValue}"
-                oninput="document.getElementById('slider-value').textContent = this.value">
+            <div class="slider-track-wrapper">
+                <input type="range" class="slider-input" id="slider-input"
+                    min="${question.min}" max="${question.max}" value="${question.defaultValue}"
+                    oninput="document.getElementById('slider-value').textContent = this.value">
+            </div>
             <div class="slider-labels">
                 <span>${question.labels.left}</span>
                 <span>${question.labels.right}</span>
@@ -383,27 +502,45 @@ function renderSliderInput(question) {
             </button>
         </div>
     `;
+
+    // Disable page scroll while using slider on mobile
+    const slider = document.getElementById('slider-input');
+    slider.addEventListener('touchstart', lockScroll);
+    slider.addEventListener('touchend', unlockScroll);
+    slider.addEventListener('touchcancel', unlockScroll);
+}
+
+// Lock/unlock scroll for slider interaction
+function lockScroll() {
+    document.body.classList.add('scroll-locked');
+}
+
+function unlockScroll() {
+    document.body.classList.remove('scroll-locked');
 }
 
 function handleSliderSubmit(questionId) {
     const value = document.getElementById('slider-input').value;
-    addUserMessage(`${value}/10`);
+
+    // Clear input area immediately
+    inputArea.innerHTML = '';
+
+    addUserMessage(value);
     state.answers[questionId] = parseInt(value);
     state.currentQuestion++;
+    saveProgress(); // Save progress after each answer
     showQuestion(state.currentQuestion);
 }
 
-// Team Entry Input (with phone and role, all fields required)
+// Team Entry Input (just name, email, phone)
 function renderTeamEntryInput(question) {
     const members = state.teamMembers;
 
     let membersHtml = members.map((member, index) => `
         <div class="team-member-card" data-index="${index}">
-            <div class="input-row">
-                <input type="text" placeholder="First Name *" value="${member.firstName || ''}"
-                    onchange="updateTeamMember(${index}, 'firstName', this.value)">
-                <input type="text" placeholder="Last Name *" value="${member.lastName || ''}"
-                    onchange="updateTeamMember(${index}, 'lastName', this.value)">
+            <div class="input-row full">
+                <input type="text" placeholder="Name *" value="${member.name || ''}"
+                    onchange="updateTeamMember(${index}, 'name', this.value)">
             </div>
             <div class="input-row">
                 <input type="email" placeholder="Email Address *" value="${member.email || ''}"
@@ -411,13 +548,19 @@ function renderTeamEntryInput(question) {
                 <input type="tel" placeholder="Phone Number *" value="${member.phone || ''}"
                     onchange="updateTeamMember(${index}, 'phone', this.value)">
             </div>
-            <div class="input-row full">
-                <input type="text" placeholder="Role (Copywriter, Marketing Manager, etc.) *" value="${member.role || ''}"
-                    onchange="updateTeamMember(${index}, 'role', this.value)">
-            </div>
             <button class="remove-btn" onclick="removeTeamMember(${index})">Remove</button>
         </div>
     `).join('');
+
+    // Show prominent Continue button if members added, subtle skip if not
+    const actionButton = members.length === 0
+        ? `<button class="skip-btn" onclick="handleTeamEntrySubmit('${question.id}')">Skip for Now</button>`
+        : `<button class="submit-btn" onclick="handleTeamEntrySubmit('${question.id}')">
+                Continue
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M5 12h14M12 5l7 7-7 7"/>
+                </svg>
+           </button>`;
 
     inputArea.innerHTML = `
         <div class="team-entry-container">
@@ -425,19 +568,15 @@ function renderTeamEntryInput(question) {
             <button class="add-member-btn" onclick="addTeamMember()">
                 ${question.addButtonText}
             </button>
-            <button class="submit-btn" onclick="handleTeamEntrySubmit('${question.id}')">
-                ${members.length === 0 ? 'Skip for Now' : 'Continue'}
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M5 12h14M12 5l7 7-7 7"/>
-                </svg>
-            </button>
+            ${actionButton}
         </div>
     `;
 }
 
 function addTeamMember() {
-    state.teamMembers.push({ firstName: '', lastName: '', email: '', phone: '', role: '' });
+    state.teamMembers.push({ name: '', email: '', phone: '' });
     renderTeamEntryInput(questions[state.currentQuestion]);
+    scrollToBottom();
 }
 
 function removeTeamMember(index) {
@@ -456,7 +595,7 @@ function handleTeamEntrySubmit(questionId) {
     if (members.length > 0) {
         let hasError = false;
         members.forEach((m, index) => {
-            if (!m.firstName || !m.lastName || !m.email || !m.phone || !m.role) {
+            if (!m.name || !m.email || !m.phone) {
                 hasError = true;
                 // Highlight empty fields
                 const card = document.querySelectorAll('.team-member-card')[index];
@@ -478,8 +617,11 @@ function handleTeamEntrySubmit(questionId) {
         }
     }
 
+    // Clear input area immediately
+    inputArea.innerHTML = '';
+
     if (members.length > 0) {
-        const summary = members.map(m => `${m.firstName} ${m.lastName} (${m.role})`).join(', ');
+        const summary = members.map(m => m.name).join(', ');
         addUserMessage(summary);
     } else {
         addUserMessage('Skipped');
@@ -487,20 +629,19 @@ function handleTeamEntrySubmit(questionId) {
 
     state.answers[questionId] = members;
     state.currentQuestion++;
+    saveProgress(); // Save progress after each answer
     showQuestion(state.currentQuestion);
 }
 
-// Partner Entry Input (with phone, no role, all fields required)
+// Partner Entry Input (just name, email, phone)
 function renderPartnerEntryInput(question) {
     const partners = state.cLevelPartners;
 
     let partnersHtml = partners.map((partner, index) => `
         <div class="team-member-card" data-index="${index}">
-            <div class="input-row">
-                <input type="text" placeholder="First Name *" value="${partner.firstName || ''}"
-                    onchange="updatePartner(${index}, 'firstName', this.value)">
-                <input type="text" placeholder="Last Name *" value="${partner.lastName || ''}"
-                    onchange="updatePartner(${index}, 'lastName', this.value)">
+            <div class="input-row full">
+                <input type="text" placeholder="Name *" value="${partner.name || ''}"
+                    onchange="updatePartner(${index}, 'name', this.value)">
             </div>
             <div class="input-row">
                 <input type="email" placeholder="Email Address *" value="${partner.email || ''}"
@@ -512,25 +653,31 @@ function renderPartnerEntryInput(question) {
         </div>
     `).join('');
 
+    // Show prominent Continue button if partners added, subtle skip if not
+    const actionButton = partners.length === 0
+        ? `<button class="skip-btn" onclick="handlePartnerEntrySubmit('${question.id}')">Skip for Now</button>`
+        : `<button class="submit-btn" onclick="handlePartnerEntrySubmit('${question.id}')">
+                Continue
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M5 12h14M12 5l7 7-7 7"/>
+                </svg>
+           </button>`;
+
     inputArea.innerHTML = `
         <div class="team-entry-container">
             ${partnersHtml}
             <button class="add-member-btn" onclick="addPartner()">
                 ${question.addButtonText}
             </button>
-            <button class="submit-btn" onclick="handlePartnerEntrySubmit('${question.id}')">
-                ${partners.length === 0 ? 'Skip for Now' : 'Continue'}
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M5 12h14M12 5l7 7-7 7"/>
-                </svg>
-            </button>
+            ${actionButton}
         </div>
     `;
 }
 
 function addPartner() {
-    state.cLevelPartners.push({ firstName: '', lastName: '', email: '', phone: '' });
+    state.cLevelPartners.push({ name: '', email: '', phone: '' });
     renderPartnerEntryInput(questions[state.currentQuestion]);
+    scrollToBottom();
 }
 
 function removePartner(index) {
@@ -549,7 +696,7 @@ function handlePartnerEntrySubmit(questionId) {
     if (partners.length > 0) {
         let hasError = false;
         partners.forEach((p, index) => {
-            if (!p.firstName || !p.lastName || !p.email || !p.phone) {
+            if (!p.name || !p.email || !p.phone) {
                 hasError = true;
                 // Highlight empty fields
                 const card = document.querySelectorAll('.team-member-card')[index];
@@ -571,8 +718,11 @@ function handlePartnerEntrySubmit(questionId) {
         }
     }
 
+    // Clear input area immediately
+    inputArea.innerHTML = '';
+
     if (partners.length > 0) {
-        const summary = partners.map(p => `${p.firstName} ${p.lastName}`).join(', ');
+        const summary = partners.map(p => p.name).join(', ');
         addUserMessage(summary);
     } else {
         addUserMessage('Skipped');
@@ -580,50 +730,62 @@ function handlePartnerEntrySubmit(questionId) {
 
     state.answers[questionId] = partners;
     state.currentQuestion++;
+    saveProgress(); // Save progress after each answer
     showQuestion(state.currentQuestion);
 }
 
 // Show Completion
-function showCompletion() {
-    updateProgress();
-
+async function showCompletion() {
     // Log all collected data
     console.log('=== CA Pro Onboarding Data ===');
     console.log(JSON.stringify(state.answers, null, 2));
     console.log('Team Members:', state.teamMembers);
     console.log('C-Level Partners:', state.cLevelPartners);
 
+    // Clear input area immediately
     inputArea.innerHTML = '';
 
-    const completionHtml = `
-        <div class="completion-container">
-            <div class="completion-icon">✓</div>
-            <h2 class="completion-title">You're All Set!</h2>
-            <p class="completion-message">
-                Thanks for completing your CA Pro onboarding. We're excited to have you in the community!
-            </p>
-            <div class="completion-checklist">
-                <h3>What Happens Next:</h3>
-                <ul>
-                    <li>Check your email for welcome materials and login info</li>
-                    <li>Your team members will receive their own onboarding emails</li>
-                    <li>Join the WhatsApp community if you haven't already</li>
-                </ul>
-            </div>
-            <p class="completion-message">
-                Questions? Reply to any of our emails or reach out in WhatsApp.
-            </p>
-        </div>
-    `;
+    // Save final data with isComplete=true
+    await saveProgress(true);
 
-    showTyping();
+    // Clear session after completion
+    sessionStorage.removeItem('onboarding_session_id');
+
+    // Hide progress bar and header
+    document.querySelector('.progress-container').style.display = 'none';
+    document.querySelector('.header').style.display = 'none';
+
+    // Animate the chat messages out
+    chatMessages.classList.add('chat-fade-out');
+
+    // Wait for fade out, then show completion screen
     setTimeout(() => {
-        addBotMessage("🎉 Amazing! You've completed the onboarding!");
-        setTimeout(() => {
-            chatMessages.innerHTML += completionHtml;
-            scrollToBottom();
-            // Launch confetti on completion too
-            launchConfetti();
-        }, 500);
-    }, 800);
+        // Clear and show completion
+        chatMessages.innerHTML = `
+            <div class="completion-container">
+                <div class="completion-icon">✓</div>
+                <h2 class="completion-title">You're in!</h2>
+                <p class="completion-message">
+                    We can't wait to help you grow your business.
+                </p>
+                <div class="completion-checklist">
+                    <h3>What Happens Next:</h3>
+                    <ul>
+                        <li>Check your email for welcome materials and login info</li>
+                        <li>Your team members will receive their own onboarding emails</li>
+                        <li>Connect with the community in WhatsApp</li>
+                    </ul>
+                </div>
+                <p class="completion-message">
+                    Questions? Reply to any of our emails or reach out in WhatsApp.
+                </p>
+            </div>
+        `;
+        chatMessages.classList.remove('chat-fade-out');
+
+        // Launch confetti
+        launchConfetti();
+
+        scrollToBottom();
+    }, 400);
 }

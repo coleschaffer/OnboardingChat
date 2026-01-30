@@ -25,6 +25,11 @@ body {
     line-height: 1.6;
 }
 
+body.scroll-locked {
+    overflow: hidden;
+    touch-action: none;
+}
+
 /* Container */
 .container {
     max-width: 800px;
@@ -279,6 +284,7 @@ body {
     display: flex;
     align-items: flex-end;
     gap: 12px;
+    padding-right: 4px;
 }
 
 .input-row-imessage .text-input {
@@ -289,10 +295,27 @@ body {
     font-size: 1rem;
     font-family: 'Roboto', sans-serif;
     background: var(--white);
-    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease, height 0.1s ease;
     resize: none;
-    max-height: 120px;
+    max-height: 150px;
     min-height: 44px;
+    line-height: 1.4;
+    overflow-y: hidden;
+    overflow-x: hidden;
+}
+
+.input-row-imessage .text-input:focus {
+    overflow-y: auto;
+}
+
+.input-row-imessage textarea.text-input {
+    height: 44px;
+}
+
+.input-row-imessage .text-input::placeholder {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .input-row-imessage .text-input:focus {
@@ -336,10 +359,9 @@ body {
 }
 
 .send-btn svg {
-    width: 20px;
-    height: 20px;
+    width: 18px;
+    height: 18px;
     color: var(--white);
-    margin-left: 2px;
 }
 
 /* Text Input (legacy style for textareas in special inputs) */
@@ -424,6 +446,7 @@ textarea.text-input {
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
+    justify-content: center;
 }
 
 .option-btn {
@@ -456,11 +479,16 @@ textarea.text-input {
     gap: 16px;
 }
 
+.slider-track-wrapper {
+    padding: 0 12px;
+}
+
 .slider-labels {
     display: flex;
     justify-content: space-between;
     font-size: 0.85rem;
     color: var(--gray-medium);
+    padding: 0 12px;
 }
 
 .slider-input {
@@ -555,12 +583,13 @@ textarea.text-input {
 }
 
 .add-member-btn {
-    background: var(--white);
-    border: 2px dashed var(--gray-light);
-    color: var(--gray-medium);
+    background: var(--primary-orange);
+    border: none;
+    color: var(--white);
     padding: 14px;
     border-radius: 12px;
     font-size: 0.95rem;
+    font-weight: 500;
     cursor: pointer;
     transition: all 0.2s ease;
     display: flex;
@@ -570,14 +599,59 @@ textarea.text-input {
 }
 
 .add-member-btn:hover {
-    border-color: var(--primary-orange);
-    color: var(--primary-orange);
+    background: #e88f00;
+}
+
+/* Skip button - subtle styling */
+.skip-btn {
+    background: transparent;
+    color: var(--gray-medium);
+    border: none;
+    padding: 12px 24px;
+    border-radius: 12px;
+    font-size: 0.9rem;
+    font-family: 'Roboto', sans-serif;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.skip-btn:hover {
+    color: var(--black);
+    background: var(--gray-light);
 }
 
 /* Completion Screen */
 .completion-container {
     text-align: center;
     padding: 40px 20px;
+    animation: slideUpFade 0.6s ease-out;
+}
+
+@keyframes slideUpFade {
+    from {
+        opacity: 0;
+        transform: translateY(40px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Fade out animation for chat when completing */
+.chat-fade-out {
+    animation: fadeOutUp 0.4s ease-out forwards;
+}
+
+@keyframes fadeOutUp {
+    from {
+        opacity: 1;
+        transform: translateY(0);
+    }
+    to {
+        opacity: 0;
+        transform: translateY(-20px);
+    }
 }
 
 .completion-icon {
@@ -652,19 +726,19 @@ textarea.text-input {
 /* Mobile Responsive */
 @media (max-width: 640px) {
     .container {
-        padding: 12px;
+        padding: 60px 12px 12px 12px;
     }
 
     .header {
-        padding: 20px 16px;
+        padding: 16px 12px;
     }
 
     .header-title {
-        font-size: 1.8rem;
+        font-size: 1.5rem;
     }
 
     .header-subtitle {
-        font-size: 1rem;
+        font-size: 0.9rem;
     }
 
     .info-card-content {
@@ -681,19 +755,48 @@ textarea.text-input {
     }
 
     .chat-messages {
-        padding: 16px;
+        padding: 12px 8px;
     }
 
     .message {
-        max-width: 90%;
+        max-width: 92%;
+    }
+
+    .message-content {
+        padding: 12px 14px;
+        font-size: 0.95rem;
     }
 
     .input-area {
-        padding: 12px 16px;
+        padding: 10px 8px;
+    }
+
+    .input-row-imessage {
+        gap: 8px;
+        padding-right: 2px;
+    }
+
+    .input-row-imessage .text-input {
+        padding: 10px 14px;
+        font-size: 16px; /* Prevents iOS zoom on focus */
+    }
+
+    .send-btn {
+        width: 40px;
+        height: 40px;
+    }
+
+    .send-btn svg {
+        width: 16px;
+        height: 16px;
     }
 
     .team-member-card .input-row {
         grid-template-columns: 1fr;
+    }
+
+    .team-member-card input {
+        font-size: 16px; /* Prevents iOS zoom on focus */
     }
 
     .button-group {
@@ -703,5 +806,55 @@ textarea.text-input {
     .option-btn {
         width: 100%;
         text-align: center;
+    }
+
+    .slider-container {
+        gap: 12px;
+    }
+
+    .slider-value {
+        font-size: 1.5rem;
+    }
+
+    .submit-btn {
+        padding: 12px 24px;
+        font-size: 0.9rem;
+    }
+
+    .skip-btn {
+        padding: 10px 20px;
+        font-size: 0.85rem;
+    }
+
+    .add-member-btn {
+        padding: 12px;
+        font-size: 0.9rem;
+    }
+
+    .progress-container {
+        padding: 10px 16px;
+    }
+
+    .progress-text {
+        font-size: 0.8rem;
+        min-width: 80px;
+    }
+
+    .completion-container {
+        padding: 30px 16px;
+    }
+
+    .completion-icon {
+        width: 60px;
+        height: 60px;
+        font-size: 30px;
+    }
+
+    .completion-title {
+        font-size: 1.4rem;
+    }
+
+    .completion-message {
+        font-size: 1rem;
     }
 }

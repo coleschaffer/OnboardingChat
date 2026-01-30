@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CA Pro Admin Dashboard</title>
+    <link rel="icon" href="/CA_Favicon.png" type="image/png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500;600;700&family=Roboto:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h1>CA Pro</h1>
+                <span class="badge">Admin</span>
+            </div>
+            <nav class="sidebar-nav">
+                <a href="#" class="nav-item active" data-tab="overview">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="3" width="7" height="7"></rect>
+                        <rect x="14" y="3" width="7" height="7"></rect>
+                        <rect x="14" y="14" width="7" height="7"></rect>
+                        <rect x="3" y="14" width="7" height="7"></rect>
+                    </svg>
+                    Overview
+                </a>
+                <a href="#" class="nav-item" data-tab="applications">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                        <polyline points="14 2 14 8 20 8"></polyline>
+                        <line x1="16" y1="13" x2="8" y2="13"></line>
+                        <line x1="16" y1="17" x2="8" y2="17"></line>
+                        <polyline points="10 9 9 9 8 9"></polyline>
+                    </svg>
+                    Applications
+                    <span class="nav-badge" id="new-applications-badge">0</span>
+                </a>
+                <a href="#" class="nav-item" data-tab="members">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                        <circle cx="9" cy="7" r="4"></circle>
+                        <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                        <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                    </svg>
+                    Members
+                </a>
+                <a href="#" class="nav-item" data-tab="team-members">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                        <circle cx="9" cy="7" r="4"></circle>
+                    </svg>
+                    Team Members
+                </a>
+                <a href="#" class="nav-item" data-tab="onboarding">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="9 11 12 14 22 4"></polyline>
+                        <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
+                    </svg>
+                    Onboarding
+                </a>
+                <a href="#" class="nav-item" data-tab="import">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="17 8 12 3 7 8"></polyline>
+                        <line x1="12" y1="3" x2="12" y2="15"></line>
+                    </svg>
+                    Import
+                </a>
+            </nav>
+            <div class="sidebar-footer">
+                <a href="/" class="back-link">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="19" y1="12" x2="5" y2="12"></line>
+                        <polyline points="12 19 5 12 12 5"></polyline>
+                    </svg>
+                    Back to Chat
+                </a>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Overview Tab -->
+            <div class="tab-content active" id="tab-overview">
+                <header class="content-header">
+                    <h2>Dashboard Overview</h2>
+                    <button class="btn btn-secondary" onclick="refreshStats()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="23 4 23 10 17 10"></polyline>
+                            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                        </svg>
+                        Refresh
+                    </button>
+                </header>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon members">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                                <circle cx="9" cy="7" r="4"></circle>
+                            </svg>
+                        </div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="stat-members">-</span>
+                            <span class="stat-label">Total Members</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon pending">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="10"></circle>
+                                <polyline points="12 6 12 12 16 14"></polyline>
+                            </svg>
+                        </div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="stat-pending">-</span>
+                            <span class="stat-label">Pending Onboarding</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon applications">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                                <polyline points="14 2 14 8 20 8"></polyline>
+                            </svg>
+                        </div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="stat-applications">-</span>
+                            <span class="stat-label">New Applications (7d)</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon team">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                                <circle cx="9" cy="7" r="4"></circle>
+                                <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                                <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                            </svg>
+                        </div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="stat-team">-</span>
+                            <span class="stat-label">Team Members</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="overview-grid">
+                    <div class="card">
+                        <h3>Recent Activity</h3>
+                        <div class="activity-feed" id="activity-feed">
+                            <div class="loading">Loading...</div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <h3>Onboarding Status</h3>
+                        <div class="status-chart" id="status-chart">
+                            <div class="loading">Loading...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Applications Tab -->
+            <div class="tab-content" id="tab-applications">
+                <header class="content-header">
+                    <h2>Applications</h2>
+                    <div class="header-actions">
+                        <div class="search-box">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="11" cy="11" r="8"></circle>
+                                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                            </svg>
+                            <input type="text" placeholder="Search applications..." id="applications-search">
+                        </div>
+                        <select id="applications-filter" class="filter-select">
+                            <option value="">All Status</option>
+                            <option value="new">New</option>
+                            <option value="reviewed">Reviewed</option>
+                            <option value="approved">Approved</option>
+                            <option value="rejected">Rejected</option>
+                        </select>
+                    </div>
+                </header>
+                <div class="table-container">
+                    <table class="data-table" id="applications-table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Email</th>
+                                <th>Revenue</th>
+                                <th>Status</th>
+                                <th>Applied</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="applications-tbody">
+                            <tr><td colspan="6" class="loading">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="pagination" id="applications-pagination"></div>
+            </div>
+
+            <!-- Members Tab -->
+            <div class="tab-content" id="tab-members">
+                <header class="content-header">
+                    <h2>Business Owners</h2>
+                    <div class="header-actions">
+                        <div class="search-box">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="11" cy="11" r="8"></circle>
+                                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                            </svg>
+                            <input type="text" placeholder="Search members..." id="members-search">
+                        </div>
+                        <select id="members-source-filter" class="filter-select">
+                            <option value="">All Sources</option>
+                            <option value="typeform">Typeform</option>
+                            <option value="csv_import">CSV Import</option>
+                            <option value="chat_onboarding">Chat Onboarding</option>
+                        </select>
+                        <select id="members-status-filter" class="filter-select">
+                            <option value="">All Status</option>
+                            <option value="pending">Pending</option>
+                            <option value="in_progress">In Progress</option>
+                            <option value="completed">Completed</option>
+                        </select>
+                    </div>
+                </header>
+                <div class="table-container">
+                    <table class="data-table" id="members-table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Business</th>
+                                <th>Email</th>
+                                <th>Revenue</th>
+                                <th>Team</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="members-tbody">
+                            <tr><td colspan="7" class="loading">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="pagination" id="members-pagination"></div>
+            </div>
+
+            <!-- Team Members Tab -->
+            <div class="tab-content" id="tab-team-members">
+                <header class="content-header">
+                    <h2>Team Members</h2>
+                    <div class="header-actions">
+                        <div class="search-box">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="11" cy="11" r="8"></circle>
+                                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                            </svg>
+                            <input type="text" placeholder="Search team members..." id="team-members-search">
+                        </div>
+                    </div>
+                </header>
+                <div class="table-container">
+                    <table class="data-table" id="team-members-table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Email</th>
+                                <th>Role</th>
+                                <th>Company</th>
+                                <th>Skills</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="team-members-tbody">
+                            <tr><td colspan="6" class="loading">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="pagination" id="team-members-pagination"></div>
+            </div>
+
+            <!-- Onboarding Tab -->
+            <div class="tab-content" id="tab-onboarding">
+                <header class="content-header">
+                    <h2>Onboarding Status</h2>
+                </header>
+                <div class="onboarding-stats" id="onboarding-stats">
+                    <div class="loading">Loading...</div>
+                </div>
+                <div style="margin: 24px 0 16px; display: flex; align-items: center; justify-content: space-between;">
+                    <h3>Submissions</h3>
+                    <div class="header-actions">
+                        <div class="search-box">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="11" cy="11" r="8"></circle>
+                                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                            </svg>
+                            <input type="text" placeholder="Search submissions..." id="submissions-search">
+                        </div>
+                        <select id="submissions-filter" class="filter-select">
+                            <option value="">All Submissions</option>
+                            <option value="true">Complete</option>
+                            <option value="false">Incomplete</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="table-container">
+                    <table class="data-table" id="submissions-table">
+                        <thead>
+                            <tr>
+                                <th>Session</th>
+                                <th>Progress</th>
+                                <th>Last Question</th>
+                                <th>Status</th>
+                                <th>Updated</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="submissions-tbody">
+                            <tr><td colspan="6" class="loading">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Import Tab -->
+            <div class="tab-content" id="tab-import">
+                <header class="content-header">
+                    <h2>Import Data</h2>
+                </header>
+
+                <div class="import-grid">
+                    <div class="card import-card">
+                        <h3>Import Business Owners</h3>
+                        <p>Upload a CSV file with business owner data from Google Forms export.</p>
+                        <div class="upload-area" id="bo-upload-area">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                <polyline points="17 8 12 3 7 8"></polyline>
+                                <line x1="12" y1="3" x2="12" y2="15"></line>
+                            </svg>
+                            <span>Drop CSV file here or click to browse</span>
+                            <input type="file" id="bo-file-input" accept=".csv" hidden>
+                        </div>
+                        <div class="import-result" id="bo-import-result"></div>
+                    </div>
+
+                    <div class="card import-card">
+                        <h3>Import Team Members</h3>
+                        <p>Upload a CSV file with team member data from Google Forms export.</p>
+                        <div class="upload-area" id="tm-upload-area">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                <polyline points="17 8 12 3 7 8"></polyline>
+                                <line x1="12" y1="3" x2="12" y2="15"></line>
+                            </svg>
+                            <span>Drop CSV file here or click to browse</span>
+                            <input type="file" id="tm-file-input" accept=".csv" hidden>
+                        </div>
+                        <div class="import-result" id="tm-import-result"></div>
+                    </div>
+                </div>
+
+                <h3 style="margin: 32px 0 16px;">Import History</h3>
+                <div class="table-container">
+                    <table class="data-table" id="import-history-table">
+                        <thead>
+                            <tr>
+                                <th>Filename</th>
+                                <th>Type</th>
+                                <th>Imported</th>
+                                <th>Failed</th>
+                                <th>Date</th>
+                            </tr>
+                        </thead>
+                        <tbody id="import-history-tbody">
+                            <tr><td colspan="5" class="loading">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Modal -->
+    <div class="modal-overlay" id="modal-overlay">
+        <div class="modal" id="modal">
+            <div class="modal-header">
+                <h3 id="modal-title">Details</h3>
+                <button class="modal-close" onclick="closeModal()">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </button>
+            </div>
+            <div class="modal-body" id="modal-body">
+                <!-- Dynamic content -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div class="toast-container" id="toast-container"></div>
+
+    <script src="script.js"></script>
+</body>
+</html>

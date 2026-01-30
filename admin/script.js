@@ -1,0 +1,1051 @@
+// CA Pro Admin Dashboard
+
+const API_BASE = '/api';
+
+// State
+let currentTab = 'overview';
+let applicationsPage = 0;
+let membersPage = 0;
+let teamMembersPage = 0;
+const pageSize = 20;
+
+// Initialize
+document.addEventListener('DOMContentLoaded', () => {
+    setupNavigation();
+    setupSearch();
+    setupFilters();
+    setupImport();
+    loadOverview();
+});
+
+// Navigation
+function setupNavigation() {
+    document.querySelectorAll('.nav-item').forEach(item => {
+        item.addEventListener('click', (e) => {
+            e.preventDefault();
+            const tab = item.dataset.tab;
+            switchTab(tab);
+        });
+    });
+}
+
+function switchTab(tab) {
+    currentTab = tab;
+
+    // Update nav
+    document.querySelectorAll('.nav-item').forEach(item => {
+        item.classList.toggle('active', item.dataset.tab === tab);
+    });
+
+    // Update content
+    document.querySelectorAll('.tab-content').forEach(content => {
+        content.classList.toggle('active', content.id === `tab-${tab}`);
+    });
+
+    // Load data
+    switch (tab) {
+        case 'overview':
+            loadOverview();
+            break;
+        case 'applications':
+            loadApplications();
+            break;
+        case 'members':
+            loadMembers();
+            break;
+        case 'team-members':
+            loadTeamMembers();
+            break;
+        case 'onboarding':
+            loadOnboarding();
+            break;
+        case 'import':
+            loadImportHistory();
+            break;
+    }
+}
+
+// Search setup
+function setupSearch() {
+    const applicationsSearch = document.getElementById('applications-search');
+    const membersSearch = document.getElementById('members-search');
+    const teamMembersSearch = document.getElementById('team-members-search');
+    const submissionsSearch = document.getElementById('submissions-search');
+
+    let searchTimeout;
+
+    [applicationsSearch, membersSearch, teamMembersSearch, submissionsSearch].forEach(input => {
+        if (input) {
+            input.addEventListener('input', () => {
+                clearTimeout(searchTimeout);
+                searchTimeout = setTimeout(() => {
+                    if (input === applicationsSearch) {
+                        applicationsPage = 0;
+                        loadApplications();
+                    } else if (input === membersSearch) {
+                        membersPage = 0;
+                        loadMembers();
+                    } else if (input === teamMembersSearch) {
+                        teamMembersPage = 0;
+                        loadTeamMembers();
+                    } else if (input === submissionsSearch) {
+                        loadOnboarding();
+                    }
+                }, 300);
+            });
+        }
+    });
+}
+
+// Filter setup
+function setupFilters() {
+    const applicationsFilter = document.getElementById('applications-filter');
+    const membersSourceFilter = document.getElementById('members-source-filter');
+    const membersStatusFilter = document.getElementById('members-status-filter');
+
+    if (applicationsFilter) {
+        applicationsFilter.addEventListener('change', () => {
+            applicationsPage = 0;
+            loadApplications();
+        });
+    }
+
+    if (membersSourceFilter) {
+        membersSourceFilter.addEventListener('change', () => {
+            membersPage = 0;
+            loadMembers();
+        });
+    }
+
+    if (membersStatusFilter) {
+        membersStatusFilter.addEventListener('change', () => {
+            membersPage = 0;
+            loadMembers();
+        });
+    }
+
+    const submissionsFilter = document.getElementById('submissions-filter');
+    if (submissionsFilter) {
+        submissionsFilter.addEventListener('change', () => {
+            loadOnboarding();
+        });
+    }
+}
+
+// Overview
+async function loadOverview() {
+    try {
+        const stats = await fetchAPI('/stats');
+
+        // Update stat cards
+        document.getElementById('stat-members').textContent = stats.totals.members;
+        document.getElementById('stat-pending').textContent = stats.totals.pending_onboardings;
+        document.getElementById('stat-applications').textContent = stats.totals.recent_applications;
+        document.getElementById('stat-team').textContent = stats.totals.team_members;
+
+        // Update badge
+        const badge = document.getElementById('new-applications-badge');
+        const newCount = stats.application_status?.new || 0;
+        badge.textContent = newCount;
+        badge.style.display = newCount > 0 ? 'inline' : 'none';
+
+        // Activity feed
+        renderActivityFeed(stats.recent_activity);
+
+        // Status chart
+        renderStatusChart(stats.onboarding_status);
+    } catch (error) {
+        console.error('Error loading overview:', error);
+        showToast('Failed to load dashboard', 'error');
+    }
+}
+
+function renderActivityFeed(activities) {
+    const feed = document.getElementById('activity-feed');
+
+    if (!activities || activities.length === 0) {
+        feed.innerHTML = '<p style="color: var(--gray-400); text-align: center; padding: 20px;">No recent activity</p>';
+        return;
+    }
+
+    feed.innerHTML = activities.map(activity => {
+        const iconClass = getActivityIcon(activity.action);
+        const text = formatActivityText(activity);
+        const time = formatTimeAgo(activity.created_at);
+
+        return `
+            <div class="activity-item">
+                <div class="activity-icon ${iconClass}">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        ${getActivitySVG(activity.action)}
+                    </svg>
+                </div>
+                <div class="activity-content">
+                    <div class="activity-text">${text}</div>
+                    <div class="activity-time">${time}</div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function getActivityIcon(action) {
+    if (action.includes('created') || action.includes('new')) return 'new';
+    if (action.includes('import')) return 'import';
+    return 'update';
+}
+
+function getActivitySVG(action) {
+    if (action.includes('created') || action.includes('new')) {
+        return '<path d="M12 5v14M5 12h14"/>';
+    }
+    if (action.includes('import')) {
+        return '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>';
+    }
+    return '<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>';
+}
+
+function formatActivityText(activity) {
+    const details = activity.details || {};
+    switch (activity.action) {
+        case 'member_created':
+            return `New member added: <strong>${details.name || 'Unknown'}</strong>`;
+        case 'member_updated':
+            return `Member updated: <strong>${details.fields?.join(', ') || 'details'}</strong>`;
+        case 'team_member_created':
+            return `New team member: <strong>${details.name || 'Unknown'}</strong> (${details.role || 'N/A'})`;
+        case 'new_application':
+            return `New application from: <strong>${details.name || 'Unknown'}</strong>`;
+        case 'application_status_changed':
+            return `Application status changed to <strong>${details.status}</strong>: ${details.name || 'Unknown'}`;
+        case 'onboarding_completed':
+            return `Onboarding completed: <strong>${details.business || 'Unknown'}</strong>`;
+        case 'csv_import':
+            return `CSV imported: ${details.imported} ${details.type} records`;
+        case 'typeform_sync':
+            return `Typeform sync: ${details.synced} new applications`;
+        default:
+            return activity.action.replace(/_/g, ' ');
+    }
+}
+
+function renderStatusChart(status) {
+    const chart = document.getElementById('status-chart');
+    const total = (status.pending || 0) + (status.in_progress || 0) + (status.completed || 0);
+
+    if (total === 0) {
+        chart.innerHTML = '<p style="color: var(--gray-400); text-align: center; padding: 20px;">No data available</p>';
+        return;
+    }
+
+    const statuses = [
+        { key: 'pending', label: 'Pending', value: status.pending || 0 },
+        { key: 'in_progress', label: 'In Progress', value: status.in_progress || 0 },
+        { key: 'completed', label: 'Completed', value: status.completed || 0 }
+    ];
+
+    chart.innerHTML = statuses.map(s => `
+        <div class="status-bar">
+            <div class="status-bar-header">
+                <span class="status-bar-label">${s.label}</span>
+                <span class="status-bar-value">${s.value}</span>
+            </div>
+            <div class="status-bar-track">
+                <div class="status-bar-fill ${s.key}" style="width: ${(s.value / total) * 100}%"></div>
+            </div>
+        </div>
+    `).join('');
+}
+
+// Applications
+async function loadApplications() {
+    const tbody = document.getElementById('applications-tbody');
+    tbody.innerHTML = '<tr><td colspan="6" class="loading">Loading...</td></tr>';
+
+    try {
+        const search = document.getElementById('applications-search')?.value || '';
+        const status = document.getElementById('applications-filter')?.value || '';
+
+        const params = new URLSearchParams({
+            limit: pageSize,
+            offset: applicationsPage * pageSize
+        });
+        if (search) params.append('search', search);
+        if (status) params.append('status', status);
+
+        const data = await fetchAPI(`/applications?${params}`);
+
+        if (data.applications.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" class="loading">No applications found</td></tr>';
+        } else {
+            tbody.innerHTML = data.applications.map(app => `
+                <tr>
+                    <td><strong>${app.first_name || ''} ${app.last_name || ''}</strong></td>
+                    <td>${app.email || '-'}</td>
+                    <td>${app.annual_revenue || '-'}</td>
+                    <td><span class="status-badge ${app.status}">${app.status}</span></td>
+                    <td>${formatDate(app.created_at)}</td>
+                    <td>
+                        <div class="action-btns">
+                            <button class="action-btn view" onclick="viewApplication('${app.id}')">View</button>
+                            ${app.status === 'new' ? `
+                                <button class="action-btn approve" onclick="updateApplicationStatus('${app.id}', 'reviewed')">Review</button>
+                            ` : ''}
+                            ${app.status === 'reviewed' ? `
+                                <button class="action-btn approve" onclick="convertApplication('${app.id}')">Approve</button>
+                                <button class="action-btn reject" onclick="updateApplicationStatus('${app.id}', 'rejected')">Reject</button>
+                            ` : ''}
+                        </div>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        renderPagination('applications', data.total, applicationsPage);
+    } catch (error) {
+        console.error('Error loading applications:', error);
+        tbody.innerHTML = '<tr><td colspan="6" class="loading">Error loading applications</td></tr>';
+    }
+}
+
+async function viewApplication(id) {
+    try {
+        const app = await fetchAPI(`/applications/${id}`);
+        openModal('Application Details', `
+            <div class="detail-row">
+                <span class="detail-label">Name</span>
+                <span class="detail-value">${app.first_name || ''} ${app.last_name || ''}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Email</span>
+                <span class="detail-value">${app.email || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Phone</span>
+                <span class="detail-value">${app.phone || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Annual Revenue</span>
+                <span class="detail-value">${app.annual_revenue || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Business</span>
+                <span class="detail-value">${app.business_description || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Main Challenge</span>
+                <span class="detail-value">${app.main_challenge || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Why CA Pro</span>
+                <span class="detail-value">${app.why_ca_pro || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Status</span>
+                <span class="detail-value"><span class="status-badge ${app.status}">${app.status}</span></span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Applied</span>
+                <span class="detail-value">${formatDate(app.created_at)}</span>
+            </div>
+        `);
+    } catch (error) {
+        showToast('Failed to load application details', 'error');
+    }
+}
+
+async function updateApplicationStatus(id, status) {
+    try {
+        await fetchAPI(`/applications/${id}/status`, {
+            method: 'PUT',
+            body: JSON.stringify({ status })
+        });
+        showToast(`Application marked as ${status}`, 'success');
+        loadApplications();
+        loadOverview();
+    } catch (error) {
+        showToast('Failed to update status', 'error');
+    }
+}
+
+async function convertApplication(id) {
+    try {
+        await fetchAPI(`/applications/${id}/convert`, { method: 'POST' });
+        showToast('Application approved and converted to member', 'success');
+        loadApplications();
+        loadOverview();
+    } catch (error) {
+        showToast(error.message || 'Failed to convert application', 'error');
+    }
+}
+
+// Members
+async function loadMembers() {
+    const tbody = document.getElementById('members-tbody');
+    tbody.innerHTML = '<tr><td colspan="7" class="loading">Loading...</td></tr>';
+
+    try {
+        const search = document.getElementById('members-search')?.value || '';
+        const source = document.getElementById('members-source-filter')?.value || '';
+        const status = document.getElementById('members-status-filter')?.value || '';
+
+        const params = new URLSearchParams({
+            limit: pageSize,
+            offset: membersPage * pageSize
+        });
+        if (search) params.append('search', search);
+        if (source) params.append('source', source);
+        if (status) params.append('status', status);
+
+        const data = await fetchAPI(`/members?${params}`);
+
+        if (data.members.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="7" class="loading">No members found</td></tr>';
+        } else {
+            tbody.innerHTML = data.members.map(member => `
+                <tr>
+                    <td><strong>${member.first_name || ''} ${member.last_name || ''}</strong></td>
+                    <td>${member.business_name || '-'}</td>
+                    <td>${member.email || '-'}</td>
+                    <td>${member.annual_revenue || '-'}</td>
+                    <td>${member.team_member_count || 0}</td>
+                    <td><span class="status-badge ${member.onboarding_status}">${member.onboarding_status?.replace('_', ' ') || 'pending'}</span></td>
+                    <td>
+                        <div class="action-btns">
+                            <button class="action-btn view" onclick="viewMember('${member.id}')">View</button>
+                        </div>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        renderPagination('members', data.total, membersPage);
+    } catch (error) {
+        console.error('Error loading members:', error);
+        tbody.innerHTML = '<tr><td colspan="7" class="loading">Error loading members</td></tr>';
+    }
+}
+
+async function viewMember(id) {
+    try {
+        const member = await fetchAPI(`/members/${id}`);
+        let teamHtml = '';
+        if (member.team_members && member.team_members.length > 0) {
+            teamHtml = `
+                <h4 style="margin-top: 20px; margin-bottom: 12px; font-size: 0.9rem; color: var(--gray-600);">Team Members</h4>
+                ${member.team_members.map(tm => `
+                    <div style="background: var(--gray-50); padding: 10px; border-radius: 6px; margin-bottom: 8px;">
+                        <strong>${tm.first_name} ${tm.last_name}</strong> - ${tm.role || tm.title || 'N/A'}<br>
+                        <small style="color: var(--gray-500);">${tm.email}</small>
+                    </div>
+                `).join('')}
+            `;
+        }
+
+        openModal(`${member.first_name} ${member.last_name}`, `
+            <div class="detail-row">
+                <span class="detail-label">Business</span>
+                <span class="detail-value">${member.business_name || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Email</span>
+                <span class="detail-value">${member.email || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Phone</span>
+                <span class="detail-value">${member.phone || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Revenue</span>
+                <span class="detail-value">${member.annual_revenue || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Team Count</span>
+                <span class="detail-value">${member.team_count || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">AI Skill Level</span>
+                <span class="detail-value">${member.ai_skill_level ? `${member.ai_skill_level}/10` : '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Traffic Sources</span>
+                <span class="detail-value">${member.traffic_sources || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Landing Pages</span>
+                <span class="detail-value">${formatLinks(member.landing_pages)}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Pain Point</span>
+                <span class="detail-value">${member.pain_point || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Massive Win</span>
+                <span class="detail-value">${member.massive_win || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Bio</span>
+                <span class="detail-value">${member.bio || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">WhatsApp</span>
+                <span class="detail-value">${member.whatsapp_number || '-'} ${member.whatsapp_joined ? '(joined)' : ''}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Source</span>
+                <span class="detail-value">${member.source?.replace('_', ' ') || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Status</span>
+                <span class="detail-value"><span class="status-badge ${member.onboarding_status}">${member.onboarding_status?.replace('_', ' ') || 'pending'}</span></span>
+            </div>
+            ${teamHtml}
+        `);
+    } catch (error) {
+        showToast('Failed to load member details', 'error');
+    }
+}
+
+// Team Members
+async function loadTeamMembers() {
+    const tbody = document.getElementById('team-members-tbody');
+    tbody.innerHTML = '<tr><td colspan="6" class="loading">Loading...</td></tr>';
+
+    try {
+        const search = document.getElementById('team-members-search')?.value || '';
+
+        const params = new URLSearchParams({
+            limit: pageSize,
+            offset: teamMembersPage * pageSize
+        });
+        if (search) params.append('search', search);
+
+        const data = await fetchAPI(`/team-members?${params}`);
+
+        if (data.team_members.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" class="loading">No team members found</td></tr>';
+        } else {
+            tbody.innerHTML = data.team_members.map(tm => `
+                <tr>
+                    <td><strong>${tm.first_name || ''} ${tm.last_name || ''}</strong></td>
+                    <td>${tm.email || '-'}</td>
+                    <td>${tm.role || tm.title || '-'}</td>
+                    <td>${tm.business_name || '-'}</td>
+                    <td>
+                        <div class="skills-display">
+                            ${tm.copywriting_skill ? `<span class="skill-badge">Copy: ${tm.copywriting_skill}</span>` : ''}
+                            ${tm.cro_skill ? `<span class="skill-badge">CRO: ${tm.cro_skill}</span>` : ''}
+                            ${tm.ai_skill ? `<span class="skill-badge">AI: ${tm.ai_skill}</span>` : ''}
+                        </div>
+                    </td>
+                    <td>
+                        <div class="action-btns">
+                            <button class="action-btn view" onclick="viewTeamMember('${tm.id}')">View</button>
+                        </div>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        renderPagination('team-members', data.total, teamMembersPage);
+    } catch (error) {
+        console.error('Error loading team members:', error);
+        tbody.innerHTML = '<tr><td colspan="6" class="loading">Error loading team members</td></tr>';
+    }
+}
+
+async function viewTeamMember(id) {
+    try {
+        const tm = await fetchAPI(`/team-members/${id}`);
+        openModal(`${tm.first_name} ${tm.last_name}`, `
+            <div class="detail-row">
+                <span class="detail-label">Email</span>
+                <span class="detail-value">${tm.email || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Phone</span>
+                <span class="detail-value">${tm.phone || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Role/Title</span>
+                <span class="detail-value">${tm.role || tm.title || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Company</span>
+                <span class="detail-value">${tm.business_name || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Business Owner</span>
+                <span class="detail-value">${tm.owner_first_name && tm.owner_last_name ? `${tm.owner_first_name} ${tm.owner_last_name}` : '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Business Summary</span>
+                <span class="detail-value">${tm.business_summary || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Responsibilities</span>
+                <span class="detail-value">${tm.responsibilities || '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Copywriting Skill</span>
+                <span class="detail-value">${tm.copywriting_skill ? `${tm.copywriting_skill}/10` : '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">CRO Skill</span>
+                <span class="detail-value">${tm.cro_skill ? `${tm.cro_skill}/10` : '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">AI Skill</span>
+                <span class="detail-value">${tm.ai_skill ? `${tm.ai_skill}/10` : '-'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Source</span>
+                <span class="detail-value">${tm.source?.replace('_', ' ') || '-'}</span>
+            </div>
+        `);
+    } catch (error) {
+        showToast('Failed to load team member details', 'error');
+    }
+}
+
+// Onboarding
+async function loadOnboarding() {
+    const statsDiv = document.getElementById('onboarding-stats');
+    const tbody = document.getElementById('submissions-tbody');
+
+    try {
+        // Get filter values
+        const search = document.getElementById('submissions-search')?.value || '';
+        const completeFilter = document.getElementById('submissions-filter')?.value || '';
+
+        // Build query params
+        const params = new URLSearchParams({ limit: 50 });
+        if (search) params.append('search', search);
+        if (completeFilter !== '') params.append('complete', completeFilter);
+
+        const [status, submissions] = await Promise.all([
+            fetchAPI('/onboarding/status'),
+            fetchAPI(`/onboarding/submissions?${params}`)
+        ]);
+
+        // Render stats - show both member status and submission counts
+        const memberStatus = status.member_status || {};
+        const subCounts = status.submissions || submissions.counts || {};
+
+        statsDiv.innerHTML = `
+            <div class="onboarding-stat pending">
+                <div class="onboarding-stat-value">${memberStatus.pending || 0}</div>
+                <div class="onboarding-stat-label">Members Pending</div>
+            </div>
+            <div class="onboarding-stat in-progress">
+                <div class="onboarding-stat-value">${subCounts.incomplete || 0}</div>
+                <div class="onboarding-stat-label">Incomplete Submissions</div>
+            </div>
+            <div class="onboarding-stat completed">
+                <div class="onboarding-stat-value">${subCounts.complete || 0}</div>
+                <div class="onboarding-stat-label">Complete Submissions</div>
+            </div>
+        `;
+
+        // Render submissions with progress info
+        if (submissions.submissions.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" class="loading">No submissions found</td></tr>';
+        } else {
+            tbody.innerHTML = submissions.submissions.map(sub => {
+                const progress = sub.progress_percentage || 0;
+                const isComplete = sub.is_complete;
+                const sessionShort = sub.session_id ? sub.session_id.substring(0, 16) + '...' : '-';
+                const statusClass = isComplete ? 'completed' : 'pending';
+                const statusText = isComplete ? 'Complete' : 'Incomplete';
+
+                return `
+                <tr>
+                    <td title="${sub.session_id || ''}">${sessionShort}</td>
+                    <td>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <div style="flex: 1; height: 8px; background: var(--gray-200); border-radius: 4px; overflow: hidden;">
+                                <div style="height: 100%; width: ${progress}%; background: ${isComplete ? 'var(--green)' : 'var(--yellow)'}; border-radius: 4px;"></div>
+                            </div>
+                            <span style="font-size: 0.8rem; color: var(--gray-500);">${progress}%</span>
+                        </div>
+                    </td>
+                    <td>${sub.last_question || '-'}</td>
+                    <td><span class="status-badge ${statusClass}">${statusText}</span></td>
+                    <td>${formatDate(sub.updated_at || sub.created_at)}</td>
+                    <td>
+                        <div class="kebab-menu">
+                            <button class="kebab-btn" onclick="toggleKebabMenu(event, '${sub.id}')">
+                                <svg viewBox="0 0 24 24" fill="currentColor">
+                                    <circle cx="12" cy="5" r="2"/>
+                                    <circle cx="12" cy="12" r="2"/>
+                                    <circle cx="12" cy="19" r="2"/>
+                                </svg>
+                            </button>
+                            <div class="kebab-dropdown" id="kebab-${sub.id}">
+                                <button class="kebab-dropdown-item" onclick="viewSubmission('${sub.id}')">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                                        <circle cx="12" cy="12" r="3"/>
+                                    </svg>
+                                    View Data
+                                </button>
+                                <button class="kebab-dropdown-item success" onclick="markSubmissionComplete('${sub.id}')">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="20 6 9 17 4 12"/>
+                                    </svg>
+                                    Mark Complete
+                                </button>
+                                <button class="kebab-dropdown-item danger" onclick="deleteSubmission('${sub.id}')">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="3 6 5 6 21 6"/>
+                                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                    </svg>
+                                    Delete
+                                </button>
+                            </div>
+                        </div>
+                    </td>
+                </tr>
+            `}).join('');
+        }
+    } catch (error) {
+        console.error('Error loading onboarding:', error);
+        statsDiv.innerHTML = '<p class="loading">Error loading data</p>';
+    }
+}
+
+async function viewSubmission(id) {
+    closeAllKebabMenus();
+    try {
+        const sub = await fetchAPI(`/onboarding/submissions/${id}`);
+        const data = sub.data || {};
+
+        openModal('Submission Data', `
+            <pre style="background: var(--gray-50); padding: 16px; border-radius: 8px; overflow-x: auto; font-size: 0.85rem;">${JSON.stringify(data, null, 2)}</pre>
+        `);
+    } catch (error) {
+        showToast('Failed to load submission data', 'error');
+    }
+}
+
+// Kebab menu functions
+function toggleKebabMenu(event, id) {
+    event.stopPropagation();
+    const dropdown = document.getElementById(`kebab-${id}`);
+    const isActive = dropdown.classList.contains('active');
+
+    // Close all other menus
+    closeAllKebabMenus();
+
+    // Toggle this menu
+    if (!isActive) {
+        dropdown.classList.add('active');
+    }
+}
+
+function closeAllKebabMenus() {
+    document.querySelectorAll('.kebab-dropdown').forEach(menu => {
+        menu.classList.remove('active');
+    });
+}
+
+// Close kebab menu when clicking outside
+document.addEventListener('click', (e) => {
+    if (!e.target.closest('.kebab-menu')) {
+        closeAllKebabMenus();
+    }
+});
+
+async function markSubmissionComplete(id) {
+    closeAllKebabMenus();
+    try {
+        await fetchAPI(`/onboarding/submissions/${id}/complete`, { method: 'POST' });
+        showToast('Submission marked as complete and moved to Members', 'success');
+        loadOnboarding();
+        loadOverview();
+    } catch (error) {
+        showToast(error.message || 'Failed to mark as complete', 'error');
+    }
+}
+
+async function deleteSubmission(id) {
+    closeAllKebabMenus();
+    if (!confirm('Are you sure you want to delete this submission? This action cannot be undone.')) {
+        return;
+    }
+
+    try {
+        await fetchAPI(`/onboarding/submissions/${id}`, { method: 'DELETE' });
+        showToast('Submission deleted', 'success');
+        loadOnboarding();
+    } catch (error) {
+        showToast(error.message || 'Failed to delete submission', 'error');
+    }
+}
+
+// Import
+function setupImport() {
+    setupUploadArea('bo-upload-area', 'bo-file-input', 'business-owners', 'bo-import-result');
+    setupUploadArea('tm-upload-area', 'tm-file-input', 'team-members', 'tm-import-result');
+}
+
+function setupUploadArea(areaId, inputId, importType, resultId) {
+    const area = document.getElementById(areaId);
+    const input = document.getElementById(inputId);
+    const result = document.getElementById(resultId);
+
+    if (!area || !input) return;
+
+    area.addEventListener('click', () => input.click());
+
+    area.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        area.classList.add('dragover');
+    });
+
+    area.addEventListener('dragleave', () => {
+        area.classList.remove('dragover');
+    });
+
+    area.addEventListener('drop', (e) => {
+        e.preventDefault();
+        area.classList.remove('dragover');
+        const file = e.dataTransfer.files[0];
+        if (file) handleFileUpload(file, importType, result);
+    });
+
+    input.addEventListener('change', () => {
+        const file = input.files[0];
+        if (file) handleFileUpload(file, importType, result);
+        input.value = '';
+    });
+}
+
+async function handleFileUpload(file, importType, resultEl) {
+    if (!file.name.endsWith('.csv')) {
+        showToast('Please upload a CSV file', 'error');
+        return;
+    }
+
+    resultEl.className = 'import-result';
+    resultEl.style.display = 'none';
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+        showToast('Importing...', 'warning');
+
+        const response = await fetch(`${API_BASE}/import/${importType}`, {
+            method: 'POST',
+            body: formData
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.error || 'Import failed');
+        }
+
+        resultEl.className = 'import-result success';
+        resultEl.textContent = `Imported ${data.imported} records. ${data.failed} failed.`;
+        resultEl.style.display = 'block';
+
+        showToast(`Import complete: ${data.imported} records imported`, 'success');
+        loadImportHistory();
+        loadOverview();
+    } catch (error) {
+        resultEl.className = 'import-result error';
+        resultEl.textContent = error.message;
+        resultEl.style.display = 'block';
+        showToast('Import failed: ' + error.message, 'error');
+    }
+}
+
+async function loadImportHistory() {
+    const tbody = document.getElementById('import-history-tbody');
+    tbody.innerHTML = '<tr><td colspan="5" class="loading">Loading...</td></tr>';
+
+    try {
+        const data = await fetchAPI('/import/history');
+
+        if (data.imports.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" class="loading">No import history</td></tr>';
+        } else {
+            tbody.innerHTML = data.imports.map(imp => `
+                <tr>
+                    <td>${imp.filename || '-'}</td>
+                    <td>${imp.import_type?.replace('_', ' ') || '-'}</td>
+                    <td>${imp.records_imported || 0}</td>
+                    <td>${imp.records_failed || 0}</td>
+                    <td>${formatDate(imp.created_at)}</td>
+                </tr>
+            `).join('');
+        }
+    } catch (error) {
+        console.error('Error loading import history:', error);
+        tbody.innerHTML = '<tr><td colspan="5" class="loading">Error loading history</td></tr>';
+    }
+}
+
+// Pagination
+function renderPagination(type, total, currentPage) {
+    const container = document.getElementById(`${type}-pagination`);
+    if (!container) return;
+
+    const totalPages = Math.ceil(total / pageSize);
+
+    if (totalPages <= 1) {
+        container.innerHTML = '';
+        return;
+    }
+
+    let html = '';
+
+    html += `<button onclick="changePage('${type}', ${currentPage - 1})" ${currentPage === 0 ? 'disabled' : ''}>Prev</button>`;
+
+    const startPage = Math.max(0, currentPage - 2);
+    const endPage = Math.min(totalPages - 1, currentPage + 2);
+
+    if (startPage > 0) {
+        html += `<button onclick="changePage('${type}', 0)">1</button>`;
+        if (startPage > 1) html += '<span>...</span>';
+    }
+
+    for (let i = startPage; i <= endPage; i++) {
+        html += `<button onclick="changePage('${type}', ${i})" class="${i === currentPage ? 'active' : ''}">${i + 1}</button>`;
+    }
+
+    if (endPage < totalPages - 1) {
+        if (endPage < totalPages - 2) html += '<span>...</span>';
+        html += `<button onclick="changePage('${type}', ${totalPages - 1})">${totalPages}</button>`;
+    }
+
+    html += `<button onclick="changePage('${type}', ${currentPage + 1})" ${currentPage >= totalPages - 1 ? 'disabled' : ''}>Next</button>`;
+
+    container.innerHTML = html;
+}
+
+function changePage(type, page) {
+    if (page < 0) return;
+
+    switch (type) {
+        case 'applications':
+            applicationsPage = page;
+            loadApplications();
+            break;
+        case 'members':
+            membersPage = page;
+            loadMembers();
+            break;
+        case 'team-members':
+            teamMembersPage = page;
+            loadTeamMembers();
+            break;
+    }
+}
+
+// Modal
+function openModal(title, content) {
+    document.getElementById('modal-title').textContent = title;
+    document.getElementById('modal-body').innerHTML = content;
+    document.getElementById('modal-overlay').classList.add('active');
+}
+
+function closeModal() {
+    document.getElementById('modal-overlay').classList.remove('active');
+}
+
+// Close modal on overlay click
+document.getElementById('modal-overlay').addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) closeModal();
+});
+
+// Close modal on Escape key
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeModal();
+});
+
+// Toast
+function showToast(message, type = 'info') {
+    const container = document.getElementById('toast-container');
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.textContent = message;
+    container.appendChild(toast);
+
+    setTimeout(() => {
+        toast.remove();
+    }, 4000);
+}
+
+// Utility functions
+async function fetchAPI(endpoint, options = {}) {
+    const response = await fetch(`${API_BASE}${endpoint}`, {
+        ...options,
+        headers: {
+            'Content-Type': 'application/json',
+            ...options.headers
+        }
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+        throw new Error(data.error || 'API request failed');
+    }
+
+    return data;
+}
+
+function formatDate(dateString) {
+    if (!dateString) return '-';
+    const date = new Date(dateString);
+    return date.toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric'
+    });
+}
+
+function formatTimeAgo(dateString) {
+    if (!dateString) return '';
+    const date = new Date(dateString);
+    const now = new Date();
+    const diff = now - date;
+
+    const minutes = Math.floor(diff / 60000);
+    const hours = Math.floor(diff / 3600000);
+    const days = Math.floor(diff / 86400000);
+
+    if (minutes < 1) return 'Just now';
+    if (minutes < 60) return `${minutes}m ago`;
+    if (hours < 24) return `${hours}h ago`;
+    if (days < 7) return `${days}d ago`;
+    return formatDate(dateString);
+}
+
+function formatLinks(text) {
+    if (!text) return '-';
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    return text.replace(urlRegex, '<a href="$1" target="_blank">$1</a>');
+}
+
+function refreshStats() {
+    loadOverview();
+    showToast('Dashboard refreshed', 'success');
+}
+
+// Expose functions to global scope
+window.viewApplication = viewApplication;
+window.updateApplicationStatus = updateApplicationStatus;
+window.convertApplication = convertApplication;
+window.viewMember = viewMember;
+window.viewTeamMember = viewTeamMember;
+window.viewSubmission = viewSubmission;
+window.changePage = changePage;
+window.closeModal = closeModal;
+window.refreshStats = refreshStats;
+window.toggleKebabMenu = toggleKebabMenu;
+window.markSubmissionComplete = markSubmissionComplete;
+window.deleteSubmission = deleteSubmission;
