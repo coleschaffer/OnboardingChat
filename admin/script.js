@@ -411,8 +411,30 @@ async function loadMembers() {
                     <td>${member.team_member_count || 0}</td>
                     <td><span class="status-badge ${member.onboarding_status}">${member.onboarding_status?.replace('_', ' ') || 'pending'}</span></td>
                     <td>
-                        <div class="action-btns">
-                            <button class="action-btn view" onclick="viewMember('${member.id}')">View</button>
+                        <div class="kebab-menu">
+                            <button class="kebab-btn" onclick="toggleKebabMenu(event, 'member-${member.id}')">
+                                <svg viewBox="0 0 24 24" fill="currentColor">
+                                    <circle cx="12" cy="5" r="2"/>
+                                    <circle cx="12" cy="12" r="2"/>
+                                    <circle cx="12" cy="19" r="2"/>
+                                </svg>
+                            </button>
+                            <div class="kebab-dropdown" id="kebab-member-${member.id}">
+                                <button class="kebab-dropdown-item" onclick="viewMember('${member.id}')">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                                        <circle cx="12" cy="12" r="3"/>
+                                    </svg>
+                                    View Data
+                                </button>
+                                <button class="kebab-dropdown-item danger" onclick="deleteMember('${member.id}')">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="3 6 5 6 21 6"/>
+                                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                    </svg>
+                                    Delete
+                                </button>
+                            </div>
                         </div>
                     </td>
                 </tr>
@@ -539,8 +561,30 @@ async function loadTeamMembers() {
                         </div>
                     </td>
                     <td>
-                        <div class="action-btns">
-                            <button class="action-btn view" onclick="viewTeamMember('${tm.id}')">View</button>
+                        <div class="kebab-menu">
+                            <button class="kebab-btn" onclick="toggleKebabMenu(event, 'tm-${tm.id}')">
+                                <svg viewBox="0 0 24 24" fill="currentColor">
+                                    <circle cx="12" cy="5" r="2"/>
+                                    <circle cx="12" cy="12" r="2"/>
+                                    <circle cx="12" cy="19" r="2"/>
+                                </svg>
+                            </button>
+                            <div class="kebab-dropdown" id="kebab-tm-${tm.id}">
+                                <button class="kebab-dropdown-item" onclick="viewTeamMember('${tm.id}')">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                                        <circle cx="12" cy="12" r="3"/>
+                                    </svg>
+                                    View Data
+                                </button>
+                                <button class="kebab-dropdown-item danger" onclick="deleteTeamMember('${tm.id}')">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="3 6 5 6 21 6"/>
+                                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                    </svg>
+                                    Delete
+                                </button>
+                            </div>
                         </div>
                     </td>
                 </tr>
@@ -1036,6 +1080,40 @@ function refreshStats() {
     showToast('Dashboard refreshed', 'success');
 }
 
+// Delete member
+async function deleteMember(id) {
+    closeAllKebabMenus();
+    if (!confirm('Are you sure you want to delete this member? This will also delete all associated team members. This action cannot be undone.')) {
+        return;
+    }
+
+    try {
+        await fetchAPI(`/members/${id}`, { method: 'DELETE' });
+        showToast('Member deleted', 'success');
+        loadMembers();
+        loadOverview();
+    } catch (error) {
+        showToast(error.message || 'Failed to delete member', 'error');
+    }
+}
+
+// Delete team member
+async function deleteTeamMember(id) {
+    closeAllKebabMenus();
+    if (!confirm('Are you sure you want to delete this team member? This action cannot be undone.')) {
+        return;
+    }
+
+    try {
+        await fetchAPI(`/team-members/${id}`, { method: 'DELETE' });
+        showToast('Team member deleted', 'success');
+        loadTeamMembers();
+        loadOverview();
+    } catch (error) {
+        showToast(error.message || 'Failed to delete team member', 'error');
+    }
+}
+
 // Expose functions to global scope
 window.viewApplication = viewApplication;
 window.updateApplicationStatus = updateApplicationStatus;
@@ -1049,3 +1127,5 @@ window.refreshStats = refreshStats;
 window.toggleKebabMenu = toggleKebabMenu;
 window.markSubmissionComplete = markSubmissionComplete;
 window.deleteSubmission = deleteSubmission;
+window.deleteMember = deleteMember;
+window.deleteTeamMember = deleteTeamMember;

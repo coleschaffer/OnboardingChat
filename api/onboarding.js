@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 
-// Helper to send Slack welcome message
+// Helper to send Slack welcome message as a thread
 async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
   const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
   const SLACK_WELCOME_USER_ID = process.env.SLACK_WELCOME_USER_ID;
@@ -118,20 +118,48 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
   const fullName = [memberData.firstName, memberData.lastName].filter(Boolean).join(' ');
   const memberName = fullName || memberData.businessName || 'New Member';
 
-  // Helper to send a message
-  async function sendMessage(blocks, text) {
+  // Helper to send a message (optionally in a thread)
+  async function sendMessage(blocks, text, threadTs = null) {
+    const payload = { channel: channelId, blocks, text };
+    if (threadTs) payload.thread_ts = threadTs;
+
     const response = await fetch('https://slack.com/api/chat.postMessage', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${SLACK_BOT_TOKEN}`
       },
-      body: JSON.stringify({ channel: channelId, blocks, text })
+      body: JSON.stringify(payload)
     });
     return response.json();
   }
 
-  // Message 1: Typeform Application Data (if available)
+  // Create parent message (thread starter) with member overview
+  const parentResult = await sendMessage([
+    {
+      type: 'header',
+      text: { type: 'plain_text', text: `🎉 New Member: ${memberName}`, emoji: true }
+    },
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: `*Business:* ${memberData.businessName || 'N/A'}\n*Email:* ${memberData.email || 'N/A'}` }
+    },
+    {
+      type: 'context',
+      elements: [
+        { type: 'mrkdwn', text: '_View thread for full details and welcome message →_' }
+      ]
+    }
+  ], `New member: ${memberName}`);
+
+  if (!parentResult.ok) {
+    throw new Error(`Failed to send parent message: ${parentResult.error}`);
+  }
+
+  const threadTs = parentResult.ts;
+  await new Promise(resolve => setTimeout(resolve, 300));
+
+  // Thread message 1: Typeform Application Data (if available)
   if (typeformData) {
     const typeformFields = [
       `*Name:* ${fullName || 'N/A'}`,
@@ -146,18 +174,18 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
     await sendMessage([
       {
         type: 'header',
-        text: { type: 'plain_text', text: `📝 Typeform Application: ${memberName}`, emoji: true }
+        text: { type: 'plain_text', text: `📝 Typeform Application`, emoji: true }
       },
       {
         type: 'section',
         text: { type: 'mrkdwn', text: typeformFields.join('\n\n') }
       }
-    ], `Typeform data for ${memberName}`);
+    ], `Typeform data for ${memberName}`, threadTs);
 
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await new Promise(resolve => setTimeout(resolve, 300));
   }
 
-  // Message 2: SamCart Purchase Data (if available)
+  // Thread message 2: SamCart Purchase Data (if available)
   if (samcartData) {
     const samcartFields = [
       `*Product:* ${samcartData.product_name || 'N/A'}`,
@@ -171,18 +199,18 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
     await sendMessage([
       {
         type: 'header',
-        text: { type: 'plain_text', text: `💳 SamCart Purchase: ${memberName}`, emoji: true }
+        text: { type: 'plain_text', text: `💳 SamCart Purchase`, emoji: true }
       },
       {
         type: 'section',
         text: { type: 'mrkdwn', text: samcartFields.join('\n\n') }
       }
-    ], `SamCart data for ${memberName}`);
+    ], `SamCart data for ${memberName}`, threadTs);
 
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await new Promise(resolve => setTimeout(resolve, 300));
   }
 
-  // Message 3: Onboarding Chat Data
+  // Thread message 3: Onboarding Chat Data
   const onboardingFields = [
     `*Business Name:* ${memberData.businessName || 'N/A'}`,
     `*Team Size:* ${memberData.teamCount || 'N/A'}`,
@@ -206,18 +234,17 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
   await sendMessage([
     {
       type: 'header',
-      text: { type: 'plain_text', text: `📋 Onboarding Chat: ${memberData.businessName || memberName}`, emoji: true }
+      text: { type: 'plain_text', text: `📋 Onboarding Chat Data`, emoji: true }
     },
     {
       type: 'section',
       text: { type: 'mrkdwn', text: onboardingFields.join('\n\n') }
     }
-  ], `Onboarding data for ${memberName}`);
+  ], `Onboarding data for ${memberName}`, threadTs);
 
-  // Small delay between messages
-  await new Promise(resolve => setTimeout(resolve, 500));
+  await new Promise(resolve => setTimeout(resolve, 300));
 
-  // Message 2: Generate and send welcome message
+  // Thread message 4: Generate and send welcome message with Copy/Edit buttons
   const welcomeMessage = await generateWelcomeMessage(memberData);
 
   // Create copy URL with encoded message
@@ -243,18 +270,23 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
           text: { type: 'plain_text', text: '📋 Copy to Clipboard', emoji: true },
           url: copyUrl,
           style: 'primary'
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: '✏️ Edit Message', emoji: true },
+          action_id: 'edit_message'
         }
       ]
     },
     {
       type: 'context',
       elements: [
-        { type: 'mrkdwn', text: '_Click Copy to open a page that copies the message. Reply to this message with edit requests (e.g., "make it shorter", "add that they have 10 years experience")._' }
+        { type: 'mrkdwn', text: '_Click Edit to request changes, or reply in this thread with edit instructions._' }
       ]
     }
-  ], `Welcome message for ${memberName}`);
+  ], `Welcome message for ${memberName}`, threadTs);
 
-  console.log('Slack welcome messages sent successfully');
+  console.log('Slack welcome thread sent successfully');
 }
 
 // Generate welcome message using Claude
