@@ -71,7 +71,7 @@ router.post('/typeform', express.raw({ type: 'application/json' }), async (req, 
       } else if (answer.type === 'phone_number' && !fieldMapping.phone) {
         fieldMapping.phone = value;
       }
-      // Then match by title keywords
+      // Then match by title keywords (order matters - more specific matches first)
       else if (fieldTitle.includes('first') && fieldTitle.includes('name')) {
         fieldMapping.first_name = value;
       } else if (fieldTitle.includes('last') && fieldTitle.includes('name')) {
@@ -85,14 +85,31 @@ router.post('/typeform', express.raw({ type: 'application/json' }), async (req, 
         } else {
           fieldMapping.first_name = value;
         }
-      } else if (fieldTitle.includes('business') || fieldTitle.includes('company') || fieldTitle.includes('describe')) {
-        fieldMapping.business_description = value;
-      } else if (fieldTitle.includes('revenue') || fieldTitle.includes('sales')) {
+      }
+      // Revenue question (MC): "What's your current annual revenue?"
+      else if (fieldTitle.includes('revenue') || fieldTitle.includes('sales')) {
         fieldMapping.annual_revenue = value;
-      } else if (fieldTitle.includes('challenge') || fieldTitle.includes('struggle') || fieldTitle.includes('problem')) {
+      }
+      // Main challenge (SA): "What's the #1 thing holding your business back from scaling right now?"
+      else if (fieldTitle.includes('holding') || fieldTitle.includes('scaling') ||
+               fieldTitle.includes('#1') || fieldTitle.includes('challenge') ||
+               fieldTitle.includes('struggle') || fieldTitle.includes('problem')) {
         fieldMapping.main_challenge = value;
-      } else if (fieldTitle.includes('why') || fieldTitle.includes('goal') || fieldTitle.includes('hope') || fieldTitle.includes('expect')) {
+      }
+      // Why CA Pro (SA): "what specifically about CA Pro made you want to apply?"
+      else if (fieldTitle.includes('ca pro') || fieldTitle.includes('made you want') ||
+               fieldTitle.includes('specifically') || fieldTitle.includes('apply') ||
+               fieldTitle.includes('why') || fieldTitle.includes('goal') ||
+               fieldTitle.includes('hope') || fieldTitle.includes('expect')) {
         fieldMapping.why_ca_pro = value;
+      }
+      // Business description (SA): "Tell me about your business. What do you sell..."
+      // Check this AFTER main_challenge to avoid matching "holding your business back"
+      else if ((fieldTitle.includes('tell') && fieldTitle.includes('business')) ||
+               fieldTitle.includes('what do you sell') || fieldTitle.includes('who do you sell') ||
+               (fieldTitle.includes('about') && fieldTitle.includes('business')) ||
+               fieldTitle.includes('company') || fieldTitle.includes('describe')) {
+        fieldMapping.business_description = value;
       }
     }
 
