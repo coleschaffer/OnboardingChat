@@ -18,6 +18,21 @@ app.locals.pool = pool;
 
 // Middleware
 app.use(cors());
+
+// Capture raw body for Slack signature verification
+app.use('/api/slack', express.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString();
+  }
+}));
+app.use('/api/slack', express.urlencoded({
+  extended: true,
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString();
+  }
+}));
+
+// Regular JSON parsing for other routes
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -30,6 +45,7 @@ app.use('/api/webhooks', require('./api/webhooks'));
 app.use('/api/import', require('./api/import'));
 app.use('/api/stats', require('./api/stats'));
 app.use('/api', require('./api/validate'));
+app.use('/api/slack', require('./api/slack'));
 
 // Serve admin dashboard
 app.use('/admin', express.static(path.join(__dirname, 'admin')));
