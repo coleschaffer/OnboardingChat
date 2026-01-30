@@ -104,20 +104,42 @@ Write ONLY the welcome message, no additional commentary.`;
     return data.content[0]?.text || 'Error generating message';
 }
 
-// Edit welcome message using Claude
-async function editWelcomeMessage(originalMessage, editRequest) {
+// Edit welcome message using Claude with full member context
+async function editWelcomeMessage(originalMessage, editRequest, memberData = {}) {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
         throw new Error('ANTHROPIC_API_KEY not set');
     }
 
-    const prompt = `Here is a welcome message for a new CA Pro member:
+    const fullName = [memberData.firstName, memberData.lastName].filter(Boolean).join(' ') || 'the member';
 
+    const prompt = `You are editing a welcome message for a CA Pro member.
+
+MEMBER INFORMATION (for context):
+- Name: ${fullName}
+- Business Name: ${memberData.businessName || 'Not provided'}
+- Business Description: ${memberData.typeformBusinessDescription || 'Not provided'}
+- Bio: ${memberData.bio || 'Not provided'}
+- What they want to achieve: ${memberData.massiveWin || 'Not provided'}
+- Why they joined CA Pro: ${memberData.typeformWhyCaPro || 'Not provided'}
+- Main Challenge: ${memberData.typeformMainChallenge || 'Not provided'}
+- Team Count: ${memberData.teamCount || 'Not provided'}
+- Traffic Sources: ${memberData.trafficSources || 'Not provided'}
+- Revenue Level: ${memberData.typeformAnnualRevenue || 'Not provided'}
+
+CURRENT WELCOME MESSAGE:
 "${originalMessage}"
 
-The user wants to make this change: "${editRequest}"
+REQUESTED CHANGE:
+"${editRequest}"
 
-Please provide the updated welcome message with that change applied. Write ONLY the updated message, no additional commentary.`;
+IMPORTANT RULES:
+1. NEVER include specific revenue numbers or dollar amounts. Only use general terms like "7 figures", "8 figures", etc.
+2. NEVER include email addresses or phone numbers.
+3. Keep the warm, professional tone.
+4. Apply ONLY the requested change - don't rewrite the entire message unless asked.
+
+Please provide the updated welcome message with the requested change applied. Write ONLY the updated welcome message, no additional commentary or explanation.`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
@@ -369,8 +391,8 @@ router.post('/events', verifySlackSignature, async (req, res) => {
             const threadTs = event.thread_ts;
             const channelId = event.channel;
 
-            // Get the parent message to find the original welcome message
-            const historyResponse = await fetch(`https://slack.com/api/conversations.replies?channel=${channelId}&ts=${threadTs}`, {
+            // Get the full thread to find the welcome message with metadata
+            const historyResponse = await fetch(`https://slack.com/api/conversations.replies?channel=${channelId}&ts=${threadTs}&include_all_metadata=true`, {
                 headers: {
                     'Authorization': `Bearer ${SLACK_BOT_TOKEN}`
                 }
@@ -382,18 +404,44 @@ router.post('/events', verifySlackSignature, async (req, res) => {
                 return;
             }
 
-            // Find the original welcome message (first message in thread with welcome text)
-            const parentMessage = historyData.messages[0];
-            const originalWelcome = parentMessage?.blocks
-                ?.find(b => b.type === 'section')?.text?.text;
+            // Find the welcome message (look for the one with welcome_message metadata or "Generated Welcome Message" header)
+            let originalWelcome = null;
+            let memberData = {};
 
-            if (!originalWelcome) {
-                console.error('Could not find original welcome message');
-                return;
+            for (const msg of historyData.messages) {
+                // Check if this is the welcome message by looking at metadata or header
+                const hasWelcomeMetadata = msg.metadata?.event_type === 'welcome_message';
+                const hasWelcomeHeader = msg.blocks?.find(b =>
+                    b.type === 'header' && b.text?.text?.includes('Generated Welcome Message')
+                );
+
+                if (hasWelcomeMetadata || hasWelcomeHeader) {
+                    // Extract the welcome text from section block
+                    originalWelcome = msg.blocks?.find(b => b.type === 'section')?.text?.text;
+
+                    // Extract member data from metadata if available
+                    if (msg.metadata?.event_payload) {
+                        memberData = msg.metadata.event_payload;
+                    }
+                    break;
+                }
             }
 
-            // Generate edited message
-            const editedMessage = await editWelcomeMessage(originalWelcome, editRequest);
+            if (!originalWelcome) {
+                // Fallback: try the parent message section
+                const parentMessage = historyData.messages[0];
+                originalWelcome = parentMessage?.blocks?.find(b => b.type === 'section')?.text?.text;
+
+                if (!originalWelcome) {
+                    console.error('Could not find original welcome message');
+                    return;
+                }
+            }
+
+            console.log('Editing welcome message with context:', Object.keys(memberData).length, 'fields');
+
+            // Generate edited message with full member context
+            const editedMessage = await editWelcomeMessage(originalWelcome, editRequest, memberData);
 
             // Post the edited version in the thread
             await fetch('https://slack.com/api/chat.postMessage', {

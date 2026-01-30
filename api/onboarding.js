@@ -152,10 +152,30 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
   const fullName = [memberData.firstName, memberData.lastName].filter(Boolean).join(' ');
   const memberName = fullName || memberData.businessName || 'New Member';
 
-  // Helper to send a message (optionally in a thread)
-  async function sendMessage(blocks, text, threadTs = null) {
+  // Helper to send a message (optionally in a thread, with optional member data for editing context)
+  async function sendMessage(blocks, text, threadTs = null, memberDataForEdit = null) {
     const payload = { channel: channelId, blocks, text };
     if (threadTs) payload.thread_ts = threadTs;
+
+    // Include member data in metadata for edit context (Slack metadata limited to 3000 chars)
+    if (memberDataForEdit) {
+      payload.metadata = {
+        event_type: 'welcome_message',
+        event_payload: {
+          firstName: memberDataForEdit.firstName || '',
+          lastName: memberDataForEdit.lastName || '',
+          businessName: memberDataForEdit.businessName || '',
+          bio: memberDataForEdit.bio || '',
+          massiveWin: memberDataForEdit.massiveWin || '',
+          teamCount: memberDataForEdit.teamCount || '',
+          trafficSources: memberDataForEdit.trafficSources || '',
+          typeformBusinessDescription: memberDataForEdit.typeformBusinessDescription || '',
+          typeformAnnualRevenue: memberDataForEdit.typeformAnnualRevenue || '',
+          typeformMainChallenge: memberDataForEdit.typeformMainChallenge || '',
+          typeformWhyCaPro: memberDataForEdit.typeformWhyCaPro || ''
+        }
+      };
+    }
 
     const response = await fetch('https://slack.com/api/chat.postMessage', {
       method: 'POST',
@@ -304,23 +324,47 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
           text: { type: 'plain_text', text: '📋 Copy to Clipboard', emoji: true },
           url: copyUrl,
           style: 'primary'
-        },
-        {
-          type: 'button',
-          text: { type: 'plain_text', text: '✏️ Edit Message', emoji: true },
-          action_id: 'edit_message'
         }
       ]
     },
     {
       type: 'context',
       elements: [
-        { type: 'mrkdwn', text: '_Click Edit to request changes, or reply in this thread with edit instructions._' }
+        { type: 'mrkdwn', text: '_Reply in this thread to request changes to the welcome message._' }
       ]
     }
-  ], `Welcome message for ${memberName}`, threadTs);
+  ], `Welcome message for ${memberName}`, threadTs, memberData);
 
   console.log('Slack welcome thread sent successfully');
+}
+
+// Convert revenue to generalized format (e.g., "$500,000" -> "6 figures")
+function generalizeRevenue(revenue) {
+  if (!revenue) return null;
+
+  // If already generalized, return as-is
+  if (/\d+\s*figures?/i.test(revenue)) return revenue;
+
+  // Try to extract a number
+  const cleanedRevenue = revenue.replace(/[$,]/g, '');
+  const match = cleanedRevenue.match(/(\d+(?:\.\d+)?)\s*(k|m|million|thousand)?/i);
+
+  if (match) {
+    let num = parseFloat(match[1]);
+    const suffix = (match[2] || '').toLowerCase();
+
+    if (suffix === 'k' || suffix === 'thousand') num *= 1000;
+    if (suffix === 'm' || suffix === 'million') num *= 1000000;
+
+    if (num >= 100000000) return '9 figures';
+    if (num >= 10000000) return '8 figures';
+    if (num >= 1000000) return '7 figures';
+    if (num >= 100000) return '6 figures';
+    if (num >= 10000) return '5 figures';
+  }
+
+  // Return original if can't parse, but never include specific amounts
+  return revenue;
 }
 
 // Generate welcome message using Claude
@@ -332,6 +376,9 @@ async function generateWelcomeMessage(memberData) {
   if (!apiKey) {
     return `Welcome to CA Pro! We're excited to have ${displayName} in the community.`;
   }
+
+  // Generalize revenue - never show exact amounts
+  const generalizedRevenue = generalizeRevenue(memberData.typeformAnnualRevenue);
 
   const prompt = `You are writing a welcome message for a new CA Pro member to be posted in a WhatsApp group.
 
@@ -345,36 +392,53 @@ Here is the member's information:
 - Main Challenge: ${memberData.typeformMainChallenge || 'Not provided'}
 - Team Count: ${memberData.teamCount || 'Not provided'}
 - Traffic Sources: ${memberData.trafficSources || 'Not provided'}
-- Annual Revenue: ${memberData.typeformAnnualRevenue || 'Not provided'}
+- Revenue Level: ${generalizedRevenue || 'Not provided'}
+
+IMPORTANT RULES:
+1. NEVER include specific revenue numbers or dollar amounts. Only use general terms like "7 figures", "8 figures", "growing revenue", etc.
+2. NEVER include email addresses or phone numbers.
+3. Focus on what's interesting about their business and journey.
 
 Write a warm, professional welcome message similar to these examples:
 
 Example 1:
-"Hey guys, please join me in extending a warm welcome to our newest CA Pro Member, Michele Monacommi! He is the co-founder of an anti-age skincare brand for men made in Italy, selling in both Italy and the US market.
+"Hey Everyone!
 
-Michele is joining CA Pro to increase creative output and become more efficient with AI, as he currently handles most of the creative development with his business partner.
+Please join me in giving a warm welcome to our newest CA Pro member, Apostolos Mentzos!
 
-We're thrilled to have Michele in the CA Pro community and excited to support his growth.
-Welcome Michele!"
+Apostolos is the founder of Hair Haven, a new ecommerce brand focused on men's supplements for hair growth. He also runs a successful car dealership and is now diving full force into the ecommerce space.
+
+We're excited to have you here, Apostolos, and looking forward to supporting you on this next stage of your journey!"
 
 Example 2:
-"Hey guys, please join me in extending a warm welcome to our newest CA Pro Member, Collin Schmelebeck!
+"Hey everyone, please join me in extending a warm welcome to our newest Mastermind Member, Javier Velasco!
 
-Collin is a Google Ads specialist who helps Meta-driven DTC brands build independent acquisition channels on Google and YouTube without relying solely on Meta to scale.
+Javier is the founder of Luminara, a natural health and beauty products brand helping people enhance their well-being and appearance. With 7 figures in revenue and growing, Luminara is making significant strides in the health and wellness industry.
 
-He's joining CA Pro to speed up his entire ad lander process and create complete systems that let him deliver better results for his clients faster than competitors.
+We're excited to have Javier join our community and look forward to supporting his journey to scale and grow Luminara.
 
-We're excited to have Collin in the CA Pro community and to support his growth. Welcome Collin!"
+Welcome Javier!"
+
+Example 3:
+"Hey guys, please join me in extending a warm welcome to our newest CA Pro Member, Jonatan Staszewski!
+
+Jonatan is the co-founder of a probiotic supplement brand. With 4+ years in ecomm and having already scaled and sold a $20M skincare brand, Jonatan brings serious experience to the community. Now he's building his next 8-figure brand in the supplement niche.
+
+We're thrilled to have Jonatan in the CA Pro community and we're excited to help him scale even further.
+
+Welcome Jonatan!"
 
 Guidelines:
-- Start with "Hey guys, please join me in extending a warm welcome to our newest CA Pro Member, [Name]!"
-- Use their actual name if available, otherwise use business name
-- Describe what they do / their business in 1-2 sentences
-- Mention why they're joining/what they hope to achieve
+- Start with "Hey guys" or "Hey everyone" and extend a warm welcome
+- Use their actual name - use first name naturally throughout
+- Describe what they do / their business in 1-2 sentences - make it sound interesting
+- If they have notable experience or achievements, mention them
+- Mention why they're joining or what they hope to achieve
 - End with a warm welcome using their first name
 - Keep it 2-3 short paragraphs
 - Be genuine and enthusiastic but not over the top
-- Use the most relevant and interesting details from their application
+- Use the most relevant and interesting details
+- If revenue is mentioned, ONLY use generalized terms (7 figures, 8 figures, etc.)
 
 Write ONLY the welcome message, no additional commentary.`;
 
