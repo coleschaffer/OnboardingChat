@@ -99,12 +99,14 @@ const questions = [
             {
                 value: 'stefan',
                 name: 'Stefan',
+                image: 'stefan-pfp.jpg',
                 description: 'Marketing & Scaling — copy reviews, funnel optimization, big picture strategy',
                 url: 'https://calendly.com/stefanpaulgeorgi/ca-pro-1-1-with-stefan'
             },
             {
                 value: 'angela',
                 name: 'Angela',
+                image: 'angela-pfp.jpeg',
                 description: 'Operations — SOPs, KPIs, hiring, team building, retention, cash flow',
                 url: 'https://calendly.com/angela-meetings/ca-pro-1-1-w-angela'
             }
@@ -507,10 +509,13 @@ function handleButtonSelect(questionId, value, label) {
 function renderSchedulingInput(question) {
     const optionsHtml = question.options.map((opt, index) => `
         <div class="scheduling-card">
-            <div class="scheduling-card-header">
-                <strong>${opt.name}</strong>
+            <div class="scheduling-card-top">
+                <img src="${opt.image}" alt="${opt.name}" class="scheduling-pfp">
+                <div class="scheduling-card-info">
+                    <strong>${opt.name}</strong>
+                    <p class="scheduling-card-desc">${opt.description}</p>
+                </div>
             </div>
-            <p class="scheduling-card-desc">${opt.description}</p>
             <a href="${opt.url}" target="_blank" class="scheduling-book-btn" data-index="${index}">
                 Book with ${opt.name}
             </a>

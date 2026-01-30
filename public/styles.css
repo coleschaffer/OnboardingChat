@@ -634,12 +634,32 @@ textarea.text-input {
     padding: 16px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 12px;
 }
 
-.scheduling-card-header {
+.scheduling-card-top {
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+}
+
+.scheduling-pfp {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+}
+
+.scheduling-card-info {
+    flex: 1;
+}
+
+.scheduling-card-info strong {
     font-size: 1.1rem;
     color: var(--black);
+    display: block;
+    margin-bottom: 4px;
 }
 
 .scheduling-card-desc {
@@ -660,7 +680,6 @@ textarea.text-input {
     font-weight: 500;
     text-align: center;
     transition: all 0.2s ease;
-    margin-top: 4px;
 }
 
 .scheduling-book-btn:hover {
@@ -910,7 +929,12 @@ textarea.text-input {
         padding: 14px;
     }
 
-    .scheduling-card-header {
+    .scheduling-pfp {
+        width: 48px;
+        height: 48px;
+    }
+
+    .scheduling-card-info strong {
         font-size: 1rem;
     }
 
