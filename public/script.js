@@ -75,9 +75,17 @@ const state = {
 // Questions Configuration
 const questions = [
     {
+        id: 'email',
+        type: 'email',
+        message: "Welcome to CA Pro! 🎉 Let's get you set up. First, what's your email address? (This should match the email you used to purchase)",
+        placeholder: "you@yourbusiness.com",
+        validation: { required: true, type: 'email' },
+        prefill: 'email' // Will auto-fill if passed in URL params
+    },
+    {
         id: 'businessName',
         type: 'text',
-        message: "First things first - what's the name of your business?",
+        message: "What's the name of your business?",
         placeholder: "Acme Health Supplements",
         validation: { required: true }
     },
@@ -533,6 +541,9 @@ function renderInput(question) {
         case 'text':
             renderTextInput(question);
             break;
+        case 'email':
+            renderEmailInput(question);
+            break;
         case 'textarea':
             renderTextareaInput(question);
             break;
@@ -595,6 +606,50 @@ function handleTextSubmit(questionId) {
 
     state.currentQuestion++;
     saveProgress(); // Save progress after each answer
+    showQuestion(state.currentQuestion);
+}
+
+// Email Input - with validation
+function renderEmailInput(question) {
+    // Check if we should prefill from URL params or state
+    const prefillValue = question.prefill ? (state.answers[question.prefill] || '') : '';
+
+    inputArea.innerHTML = `
+        <div class="input-row-imessage">
+            <input type="email" class="text-input" id="email-input"
+                placeholder="${question.placeholder || ''}"
+                value="${prefillValue}"
+                onkeypress="if(event.key === 'Enter') handleEmailSubmit('${question.id}')">
+            <button class="send-btn" onclick="handleEmailSubmit('${question.id}')">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8-8-8z" transform="rotate(-90 12 12)"/>
+                </svg>
+            </button>
+        </div>
+    `;
+    document.getElementById('email-input').focus();
+}
+
+function handleEmailSubmit(questionId) {
+    const input = document.getElementById('email-input');
+    const value = input.value.trim();
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!value || !emailRegex.test(value)) {
+        input.style.borderColor = '#ef4444';
+        input.placeholder = 'Please enter a valid email';
+        return;
+    }
+
+    // Clear input area immediately
+    inputArea.innerHTML = '';
+
+    addUserMessage(value);
+    state.answers[questionId] = value;
+
+    state.currentQuestion++;
+    saveProgress();
     showQuestion(state.currentQuestion);
 }
 
