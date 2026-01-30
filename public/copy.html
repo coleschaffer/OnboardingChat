@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Copied!</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f8f9fa;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 12px;
+            padding: 40px;
+            text-align: center;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            max-width: 500px;
+            width: 100%;
+        }
+        .icon {
+            width: 60px;
+            height: 60px;
+            background: #10b981;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 20px;
+            font-size: 28px;
+            color: white;
+        }
+        h1 {
+            color: #111827;
+            font-size: 1.5rem;
+            margin-bottom: 10px;
+        }
+        p {
+            color: #6b7280;
+            margin-bottom: 20px;
+        }
+        .message-preview {
+            background: #f3f4f6;
+            border-radius: 8px;
+            padding: 16px;
+            text-align: left;
+            font-size: 0.9rem;
+            color: #374151;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .close-note {
+            margin-top: 20px;
+            font-size: 0.85rem;
+            color: #9ca3af;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="icon">✓</div>
+        <h1>Copied to Clipboard!</h1>
+        <p>The welcome message has been copied. You can now paste it into WhatsApp.</p>
+        <div class="message-preview" id="message-preview">Loading...</div>
+        <p class="close-note">You can close this tab and return to Slack.</p>
+    </div>
+
+    <script>
+        const params = new URLSearchParams(window.location.search);
+        const text = params.get('text') || '';
+        const decoded = decodeURIComponent(text);
+
+        document.getElementById('message-preview').textContent = decoded;
+
+        if (decoded) {
+            navigator.clipboard.writeText(decoded).then(() => {
+                console.log('Copied to clipboard');
+            }).catch(err => {
+                console.error('Failed to copy:', err);
+                document.querySelector('h1').textContent = 'Copy the text below';
+                document.querySelector('p').textContent = 'Select all and copy manually:';
+            });
+        }
+    </script>
+</body>
+</html>

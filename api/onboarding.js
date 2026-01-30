@@ -3,9 +3,10 @@ const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 
 // Helper to send Slack welcome message
-async function sendSlackWelcome(answers, teamMembers) {
+async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
   const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
   const SLACK_WELCOME_USER_ID = process.env.SLACK_WELCOME_USER_ID;
+  const BASE_URL = process.env.BASE_URL || 'https://onboarding.copyaccelerator.com';
 
   // Skip if Slack is not configured
   if (!SLACK_BOT_TOKEN || !SLACK_WELCOME_USER_ID) {
@@ -13,21 +14,26 @@ async function sendSlackWelcome(answers, teamMembers) {
     return;
   }
 
+  // Try to find Typeform data by email (if we have email from answers or can find it)
+  let typeformData = null;
+  // Note: The onboarding chat doesn't collect email, so we can't match Typeform data yet
+  // This would need email to be passed from SamCart redirect or collected in the chat
+
   // Build member data from chat answers
   const memberData = {
     firstName: answers.firstName || '',
     lastName: answers.lastName || '',
     businessName: answers.businessName || '',
-    businessOverview: answers.bio || '', // Use bio as business overview
+    businessOverview: answers.bio || '',
     massiveWin: answers.massiveWin || '',
     teamCount: answers.teamCount || '',
-    trafficSources: answers.trafficSources || ''
+    trafficSources: answers.trafficSources || '',
+    landingPages: answers.landingPages || '',
+    aiSkillLevel: answers.aiSkillLevel || '',
+    bio: answers.bio || ''
   };
 
   console.log('Sending Slack welcome for:', memberData.businessName);
-
-  // Generate welcome message using Claude
-  const welcomeMessage = await generateWelcomeMessage(memberData);
 
   // Open DM channel with the welcome user
   const openResponse = await fetch('https://slack.com/api/conversations.open', {
@@ -47,69 +53,96 @@ async function sendSlackWelcome(answers, teamMembers) {
   const channelId = openData.channel.id;
   const memberName = memberData.businessName || 'New Member';
 
-  // Send message with buttons
-  const msgResponse = await fetch('https://slack.com/api/chat.postMessage', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${SLACK_BOT_TOKEN}`
-    },
-    body: JSON.stringify({
-      channel: channelId,
-      blocks: [
-        {
-          type: 'header',
-          text: {
-            type: 'plain_text',
-            text: `Welcome Message for ${memberName}`,
-            emoji: true
-          }
-        },
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: welcomeMessage
-          }
-        },
-        {
-          type: 'divider'
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '📋 Copy Message',
-                emoji: true
-              },
-              action_id: 'copy_message',
-              style: 'primary'
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '✏️ Edit Message',
-                emoji: true
-              },
-              action_id: 'edit_message'
-            }
-          ]
-        }
-      ],
-      text: `Welcome message for ${memberName}`
-    })
-  });
-
-  const msgData = await msgResponse.json();
-  if (!msgData.ok) {
-    throw new Error(`Failed to send message: ${msgData.error}`);
+  // Helper to send a message
+  async function sendMessage(blocks, text) {
+    const response = await fetch('https://slack.com/api/chat.postMessage', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${SLACK_BOT_TOKEN}`
+      },
+      body: JSON.stringify({ channel: channelId, blocks, text })
+    });
+    return response.json();
   }
 
-  console.log('Slack welcome message sent successfully');
+  // Message 1: Onboarding Chat Data
+  const onboardingFields = [
+    `*Business Name:* ${memberData.businessName || 'N/A'}`,
+    `*Team Size:* ${memberData.teamCount || 'N/A'}`,
+    `*Traffic Sources:* ${memberData.trafficSources || 'N/A'}`,
+    `*Landing Pages:* ${memberData.landingPages || 'N/A'}`,
+    `*Massive Win Goal:* ${memberData.massiveWin || 'N/A'}`,
+    `*AI Skill Level:* ${memberData.aiSkillLevel || 'N/A'}/10`,
+    `*Bio:* ${memberData.bio || 'N/A'}`
+  ];
+
+  if (teamMembers && teamMembers.length > 0) {
+    const teamList = teamMembers.map(tm => `  • ${tm.name} (${tm.email})`).join('\n');
+    onboardingFields.push(`*Team Members Added:*\n${teamList}`);
+  }
+
+  if (cLevelPartners && cLevelPartners.length > 0) {
+    const partnerList = cLevelPartners.map(p => `  • ${p.name} (${p.email})`).join('\n');
+    onboardingFields.push(`*C-Level Partners:*\n${partnerList}`);
+  }
+
+  await sendMessage([
+    {
+      type: 'header',
+      text: { type: 'plain_text', text: `📋 New CA Pro Member: ${memberName}`, emoji: true }
+    },
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: '*Onboarding Chat Responses:*' }
+    },
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: onboardingFields.join('\n\n') }
+    }
+  ], `Onboarding data for ${memberName}`);
+
+  // Small delay between messages
+  await new Promise(resolve => setTimeout(resolve, 500));
+
+  // Message 2: Generate and send welcome message
+  const welcomeMessage = await generateWelcomeMessage(memberData);
+
+  // Create copy URL with encoded message
+  const copyUrl = `${BASE_URL}/copy.html?text=${encodeURIComponent(welcomeMessage)}`;
+
+  await sendMessage([
+    {
+      type: 'header',
+      text: { type: 'plain_text', text: '✨ Generated Welcome Message', emoji: true }
+    },
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: welcomeMessage }
+    },
+    {
+      type: 'divider'
+    },
+    {
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: '📋 Copy to Clipboard', emoji: true },
+          url: copyUrl,
+          style: 'primary'
+        }
+      ]
+    },
+    {
+      type: 'context',
+      elements: [
+        { type: 'mrkdwn', text: '_Click Copy to open a page that copies the message. Reply to this message with edit requests (e.g., "make it shorter", "add that they have 10 years experience")._' }
+      ]
+    }
+  ], `Welcome message for ${memberName}`);
+
+  console.log('Slack welcome messages sent successfully');
 }
 
 // Generate welcome message using Claude
@@ -247,7 +280,7 @@ router.post('/save-progress', async (req, res) => {
       businessOwnerId = await createOrUpdateBusinessOwner(pool, answers, teamMembers, cLevelPartners, session, submissionId);
 
       // Send Slack welcome message (async, don't wait)
-      sendSlackWelcome(answers).catch(err => {
+      sendSlackWelcome(answers, teamMembers, cLevelPartners, pool).catch(err => {
         console.error('Failed to send Slack welcome:', err);
       });
     }
