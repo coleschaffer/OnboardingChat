@@ -4,6 +4,7 @@ const crypto = require('crypto');
 
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
+const SLACK_WELCOME_USER_ID = process.env.SLACK_WELCOME_USER_ID || 'U0ABG2G4Q2G';
 
 // Verify Slack request signature
 function verifySlackSignature(req, res, next) {
@@ -461,15 +462,18 @@ router.post('/send-welcome', async (req, res) => {
     try {
         const { userId, memberData } = req.body;
 
-        if (!userId || !memberData) {
-            return res.status(400).json({ error: 'Missing userId or memberData' });
+        if (!memberData) {
+            return res.status(400).json({ error: 'Missing memberData' });
         }
+
+        // Use provided userId or fall back to default
+        const targetUserId = userId || SLACK_WELCOME_USER_ID;
 
         // Generate welcome message
         const welcomeMessage = await generateWelcomeMessage(memberData);
 
         // Send DM to the specified user
-        const result = await sendDMToUser(userId, welcomeMessage, memberData);
+        const result = await sendDMToUser(targetUserId, welcomeMessage, memberData);
 
         res.json({
             success: true,

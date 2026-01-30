@@ -2,6 +2,39 @@ const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 
+// Helper to send Slack welcome message
+async function sendSlackWelcome(answers) {
+  // Skip if Slack is not configured
+  if (!process.env.SLACK_BOT_TOKEN) {
+    console.log('Slack not configured, skipping welcome message');
+    return;
+  }
+
+  const memberData = {
+    firstName: answers.firstName || '',
+    lastName: answers.lastName || '',
+    businessName: answers.businessName || '',
+    businessOverview: answers.businessOverview || '',
+    massiveWin: answers.massiveWin || '',
+    teamCount: answers.teamCount || '',
+    trafficSources: answers.trafficSources || ''
+  };
+
+  // Call our own Slack endpoint
+  const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
+  const response = await fetch(`${baseUrl}/api/slack/send-welcome`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ memberData })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Slack API returned ${response.status}`);
+  }
+
+  console.log('Slack welcome message sent successfully');
+}
+
 // Save progress (partial or complete)
 router.post('/save-progress', async (req, res) => {
   try {
@@ -63,6 +96,11 @@ router.post('/save-progress', async (req, res) => {
     // If complete, create/update business owner and team members
     if (isComplete) {
       businessOwnerId = await createOrUpdateBusinessOwner(pool, answers, teamMembers, cLevelPartners, session, submissionId);
+
+      // Send Slack welcome message (async, don't wait)
+      sendSlackWelcome(answers).catch(err => {
+        console.error('Failed to send Slack welcome:', err);
+      });
     }
 
     res.json({
