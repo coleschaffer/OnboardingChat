@@ -441,7 +441,14 @@ router.post('/events', verifySlackSignature, async (req, res) => {
             console.log('Editing welcome message with context:', Object.keys(memberData).length, 'fields');
 
             // Generate edited message with full member context
-            const editedMessage = await editWelcomeMessage(originalWelcome, editRequest, memberData);
+            let editedMessage = await editWelcomeMessage(originalWelcome, editRequest, memberData);
+
+            // Strip leading/trailing quotes if Claude wrapped the message in them
+            editedMessage = editedMessage.replace(/^["']|["']$/g, '').trim();
+
+            // Create copy URL for the button
+            const BASE_URL = process.env.BASE_URL || 'https://onboarding.copyaccelerator.com';
+            const copyUrl = `${BASE_URL}/copy.html?text=${encodeURIComponent(editedMessage)}`;
 
             // Post the edited version in the thread
             await fetch('https://slack.com/api/chat.postMessage', {
@@ -454,13 +461,6 @@ router.post('/events', verifySlackSignature, async (req, res) => {
                     channel: channelId,
                     thread_ts: threadTs,
                     blocks: [
-                        {
-                            type: 'section',
-                            text: {
-                                type: 'mrkdwn',
-                                text: '*Here\'s the updated message:*'
-                            }
-                        },
                         {
                             type: 'section',
                             text: {
@@ -481,7 +481,7 @@ router.post('/events', verifySlackSignature, async (req, res) => {
                                         text: '📋 Copy This Version',
                                         emoji: true
                                     },
-                                    action_id: 'copy_message',
+                                    url: copyUrl,
                                     style: 'primary'
                                 }
                             ]
