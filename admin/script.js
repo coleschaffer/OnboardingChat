@@ -292,8 +292,30 @@ async function loadApplications() {
                     <td><span class="status-badge ${app.status}">${app.status}</span></td>
                     <td>${formatDate(app.created_at)}</td>
                     <td>
-                        <div class="action-btns">
-                            <button class="action-btn view" onclick="viewApplication('${app.id}')">View</button>
+                        <div class="kebab-menu">
+                            <button class="kebab-btn" onclick="toggleKebabMenu(event, 'app-${app.id}')">
+                                <svg viewBox="0 0 24 24" fill="currentColor">
+                                    <circle cx="12" cy="5" r="2"/>
+                                    <circle cx="12" cy="12" r="2"/>
+                                    <circle cx="12" cy="19" r="2"/>
+                                </svg>
+                            </button>
+                            <div class="kebab-dropdown" id="kebab-app-${app.id}">
+                                <button class="kebab-dropdown-item" onclick="viewApplication('${app.id}')">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                                        <circle cx="12" cy="12" r="3"/>
+                                    </svg>
+                                    View Data
+                                </button>
+                                <button class="kebab-dropdown-item danger" onclick="deleteApplication('${app.id}')">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="3 6 5 6 21 6"/>
+                                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                    </svg>
+                                    Delete
+                                </button>
+                            </div>
                         </div>
                     </td>
                 </tr>
@@ -1150,6 +1172,23 @@ async function deleteTeamMember(id) {
     }
 }
 
+// Delete application
+async function deleteApplication(id) {
+    closeAllKebabMenus();
+    if (!confirm('Are you sure you want to delete this Typeform application? This action cannot be undone.')) {
+        return;
+    }
+
+    try {
+        await fetchAPI(`/applications/${id}`, { method: 'DELETE' });
+        showToast('Application deleted', 'success');
+        loadApplications();
+        loadOverview();
+    } catch (error) {
+        showToast(error.message || 'Failed to delete application', 'error');
+    }
+}
+
 // Expose functions to global scope
 window.viewApplication = viewApplication;
 window.updateApplicationStatus = updateApplicationStatus;
@@ -1165,3 +1204,4 @@ window.markSubmissionComplete = markSubmissionComplete;
 window.deleteSubmission = deleteSubmission;
 window.deleteMember = deleteMember;
 window.deleteTeamMember = deleteTeamMember;
+window.deleteApplication = deleteApplication;
