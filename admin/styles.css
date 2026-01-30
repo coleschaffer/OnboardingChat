@@ -476,6 +476,11 @@ body {
     background: var(--white);
     border-radius: 12px;
     box-shadow: var(--shadow);
+    overflow: visible;
+}
+
+.table-container .data-table {
+    border-radius: 12px;
     overflow: hidden;
 }
 
@@ -926,9 +931,9 @@ body {
     background: var(--white);
     border: 1px solid var(--gray-200);
     border-radius: 8px;
-    box-shadow: var(--shadow-md);
+    box-shadow: var(--shadow-lg);
     min-width: 160px;
-    z-index: 100;
+    z-index: 1000;
     display: none;
 }
 
