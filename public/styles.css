@@ -620,6 +620,54 @@ textarea.text-input {
     background: var(--gray-light);
 }
 
+/* Scheduling Cards (1:1 booking) */
+.scheduling-container {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.scheduling-card {
+    background: var(--white);
+    border: 1px solid var(--gray-light);
+    border-radius: 12px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.scheduling-card-header {
+    font-size: 1.1rem;
+    color: var(--black);
+}
+
+.scheduling-card-desc {
+    font-size: 0.9rem;
+    color: var(--gray-medium);
+    margin: 0;
+    line-height: 1.4;
+}
+
+.scheduling-book-btn {
+    display: inline-block;
+    background: var(--primary-orange);
+    color: var(--white);
+    text-decoration: none;
+    padding: 10px 16px;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    text-align: center;
+    transition: all 0.2s ease;
+    margin-top: 4px;
+}
+
+.scheduling-book-btn:hover {
+    background: #e88f00;
+    transform: translateY(-1px);
+}
+
 /* Completion Screen */
 .completion-container {
     text-align: center;
@@ -856,5 +904,22 @@ textarea.text-input {
 
     .completion-message {
         font-size: 1rem;
+    }
+
+    .scheduling-card {
+        padding: 14px;
+    }
+
+    .scheduling-card-header {
+        font-size: 1rem;
+    }
+
+    .scheduling-card-desc {
+        font-size: 0.85rem;
+    }
+
+    .scheduling-book-btn {
+        padding: 10px 14px;
+        font-size: 0.85rem;
     }
 }

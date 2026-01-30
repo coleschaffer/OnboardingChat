@@ -92,11 +92,24 @@ const questions = [
         validation: { required: true }
     },
     {
-        id: 'headshotLink',
-        type: 'text',
-        message: "Please share a link to a headshot or professional photo for your directory profile. A social media link is also fine.",
-        placeholder: "Paste link here...",
-        validation: { required: true }
+        id: 'scheduleCall',
+        type: 'scheduling',
+        message: "Want to schedule your first 1:1 call? Pick who would be most helpful for where you're at:",
+        options: [
+            {
+                value: 'stefan',
+                name: 'Stefan',
+                description: 'Marketing & Scaling — copy reviews, funnel optimization, big picture strategy',
+                url: 'https://calendly.com/stefanpaulgeorgi/ca-pro-1-1-with-stefan'
+            },
+            {
+                value: 'angela',
+                name: 'Angela',
+                description: 'Operations — SOPs, KPIs, hiring, team building, retention, cash flow',
+                url: 'https://calendly.com/angela-meetings/ca-pro-1-1-w-angela'
+            }
+        ],
+        optional: true
     },
     {
         id: 'whatsappJoined',
@@ -364,6 +377,9 @@ function renderInput(question) {
         case 'partnerEntry':
             renderPartnerEntryInput(question);
             break;
+        case 'scheduling':
+            renderSchedulingInput(question);
+            break;
     }
 
     scrollToBottom();
@@ -484,6 +500,55 @@ function handleButtonSelect(questionId, value, label) {
     state.answers[questionId] = value;
     state.currentQuestion++;
     saveProgress(); // Save progress after each answer
+    showQuestion(state.currentQuestion);
+}
+
+// Scheduling Input (for 1:1 call booking)
+function renderSchedulingInput(question) {
+    const optionsHtml = question.options.map((opt, index) => `
+        <div class="scheduling-card">
+            <div class="scheduling-card-header">
+                <strong>${opt.name}</strong>
+            </div>
+            <p class="scheduling-card-desc">${opt.description}</p>
+            <a href="${opt.url}" target="_blank" class="scheduling-book-btn" data-index="${index}">
+                Book with ${opt.name}
+            </a>
+        </div>
+    `).join('');
+
+    inputArea.innerHTML = `
+        <div class="scheduling-container">
+            ${optionsHtml}
+            <button class="skip-btn" id="skip-scheduling">Skip for Now</button>
+        </div>
+    `;
+
+    // Track when someone clicks a booking link
+    document.querySelectorAll('.scheduling-book-btn').forEach((btn, index) => {
+        btn.addEventListener('click', () => {
+            const opt = question.options[index];
+            // Mark that they clicked to book (link opens in new tab)
+            setTimeout(() => {
+                handleSchedulingSelect(question.id, opt.value, `Booking with ${opt.name}`);
+            }, 500);
+        });
+    });
+
+    // Skip button
+    document.getElementById('skip-scheduling').addEventListener('click', () => {
+        handleSchedulingSelect(question.id, 'skipped', 'Skipped');
+    });
+}
+
+function handleSchedulingSelect(questionId, value, label) {
+    // Clear input area immediately
+    inputArea.innerHTML = '';
+
+    addUserMessage(label);
+    state.answers[questionId] = value;
+    state.currentQuestion++;
+    saveProgress();
     showQuestion(state.currentQuestion);
 }
 
