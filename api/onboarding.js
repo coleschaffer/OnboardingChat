@@ -14,43 +14,55 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
     return;
   }
 
-  // Try to find Typeform data by email or phone
+  // Try to find Typeform data using multiple matching strategies: email → phone → name
   let typeformData = null;
   let samcartData = null;
 
-  if (pool && (answers.email || answers.phone)) {
+  if (pool) {
+    // Strategy 1: Try email
+    // Strategy 2: Try phone
+    // Strategy 3: Try first_name + last_name
     try {
-      let query = 'SELECT * FROM typeform_applications WHERE ';
-      let params = [];
       let conditions = [];
+      let params = [];
 
       if (answers.email) {
         conditions.push(`LOWER(email) = LOWER($${params.length + 1})`);
         params.push(answers.email);
       }
       if (answers.phone) {
-        // Clean phone number for comparison (remove non-digits)
         const cleanPhone = answers.phone.replace(/\D/g, '');
-        conditions.push(`REPLACE(REPLACE(REPLACE(phone, '-', ''), ' ', ''), '+', '') LIKE '%' || $${params.length + 1}`);
-        params.push(cleanPhone.slice(-10)); // Last 10 digits
+        if (cleanPhone.length >= 10) {
+          conditions.push(`REPLACE(REPLACE(REPLACE(phone, '-', ''), ' ', ''), '+', '') LIKE '%' || $${params.length + 1}`);
+          params.push(cleanPhone.slice(-10));
+        }
+      }
+      if (answers.firstName && answers.lastName) {
+        conditions.push(`(LOWER(first_name) = LOWER($${params.length + 1}) AND LOWER(last_name) = LOWER($${params.length + 2}))`);
+        params.push(answers.firstName, answers.lastName);
       }
 
-      query += conditions.join(' OR ') + ' ORDER BY created_at DESC LIMIT 1';
-      const result = await pool.query(query, params);
+      if (conditions.length > 0) {
+        const query = `SELECT * FROM typeform_applications WHERE ${conditions.join(' OR ')} ORDER BY created_at DESC LIMIT 1`;
+        const result = await pool.query(query, params);
 
-      if (result.rows.length > 0) {
-        typeformData = result.rows[0];
-        console.log('Found matching Typeform data for:', typeformData.email || typeformData.phone);
+        if (result.rows.length > 0) {
+          typeformData = result.rows[0];
+          console.log('Found matching Typeform data for:', typeformData.email || typeformData.first_name);
+        } else {
+          console.log('No Typeform match found with conditions:', conditions.length, 'params:', params);
+        }
+      } else {
+        console.log('No email, phone, or name available for Typeform lookup');
       }
     } catch (err) {
       console.error('Error looking up Typeform data:', err);
     }
 
-    // Also look up SamCart order data
+    // Also look up SamCart order data with same strategy
     try {
-      let query = 'SELECT * FROM samcart_orders WHERE ';
-      let params = [];
       let conditions = [];
+      let params = [];
 
       if (answers.email) {
         conditions.push(`LOWER(email) = LOWER($${params.length + 1})`);
@@ -58,19 +70,41 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
       }
       if (answers.phone) {
         const cleanPhone = answers.phone.replace(/\D/g, '');
-        conditions.push(`REPLACE(REPLACE(REPLACE(phone, '-', ''), ' ', ''), '+', '') LIKE '%' || $${params.length + 1}`);
-        params.push(cleanPhone.slice(-10));
+        if (cleanPhone.length >= 10) {
+          conditions.push(`REPLACE(REPLACE(REPLACE(phone, '-', ''), ' ', ''), '+', '') LIKE '%' || $${params.length + 1}`);
+          params.push(cleanPhone.slice(-10));
+        }
+      }
+      if (answers.firstName && answers.lastName) {
+        conditions.push(`(LOWER(first_name) = LOWER($${params.length + 1}) AND LOWER(last_name) = LOWER($${params.length + 2}))`);
+        params.push(answers.firstName, answers.lastName);
       }
 
-      query += conditions.join(' OR ') + ' ORDER BY created_at DESC LIMIT 1';
-      const result = await pool.query(query, params);
+      if (conditions.length > 0) {
+        const query = `SELECT * FROM samcart_orders WHERE ${conditions.join(' OR ')} ORDER BY created_at DESC LIMIT 1`;
+        const result = await pool.query(query, params);
 
-      if (result.rows.length > 0) {
-        samcartData = result.rows[0];
-        console.log('Found matching SamCart data for:', samcartData.email || samcartData.phone);
+        if (result.rows.length > 0) {
+          samcartData = result.rows[0];
+          console.log('Found matching SamCart data for:', samcartData.email || samcartData.first_name);
+        }
       }
     } catch (err) {
       console.error('Error looking up SamCart data:', err);
+    }
+
+    // Log matches to activity feed
+    if (typeformData) {
+      const typeformName = [typeformData.first_name, typeformData.last_name].filter(Boolean).join(' ') || typeformData.email;
+      const onboardingName = answers.businessName || 'Onboarding';
+      await pool.query(`
+        INSERT INTO activity_log (action, entity_type, entity_id, details)
+        VALUES ($1, $2, $3, $4)
+      `, ['record_matched', 'match', typeformData.id, JSON.stringify({
+        typeform_name: typeformName,
+        onboarding_name: onboardingName,
+        match_type: 'typeform_to_onboarding'
+      })]);
     }
   }
 

@@ -222,6 +222,122 @@ router.put('/:id', async (req, res) => {
   }
 });
 
+// Get unified profile with linked Typeform and SamCart data
+router.get('/:id/unified', async (req, res) => {
+  try {
+    const pool = req.app.locals.pool;
+    const { id } = req.params;
+
+    // Get the business owner
+    const memberResult = await pool.query(
+      'SELECT * FROM business_owners WHERE id = $1',
+      [id]
+    );
+
+    if (memberResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Member not found' });
+    }
+
+    const member = memberResult.rows[0];
+
+    // Get team members
+    const teamResult = await pool.query(
+      'SELECT * FROM team_members WHERE business_owner_id = $1 ORDER BY created_at',
+      [id]
+    );
+
+    // Get C-level partners
+    const partnersResult = await pool.query(
+      'SELECT * FROM c_level_partners WHERE business_owner_id = $1 ORDER BY created_at',
+      [id]
+    );
+
+    // Get onboarding submissions
+    const submissionsResult = await pool.query(
+      'SELECT * FROM onboarding_submissions WHERE business_owner_id = $1 ORDER BY created_at DESC',
+      [id]
+    );
+
+    // Look up linked Typeform data by email, phone, or name
+    let typeformData = null;
+    try {
+      let conditions = [];
+      let params = [];
+
+      if (member.email) {
+        conditions.push(`LOWER(email) = LOWER($${params.length + 1})`);
+        params.push(member.email);
+      }
+      if (member.phone) {
+        const cleanPhone = member.phone.replace(/\D/g, '');
+        if (cleanPhone.length >= 10) {
+          conditions.push(`REPLACE(REPLACE(REPLACE(phone, '-', ''), ' ', ''), '+', '') LIKE '%' || $${params.length + 1}`);
+          params.push(cleanPhone.slice(-10));
+        }
+      }
+      if (member.first_name && member.last_name) {
+        conditions.push(`(LOWER(first_name) = LOWER($${params.length + 1}) AND LOWER(last_name) = LOWER($${params.length + 2}))`);
+        params.push(member.first_name, member.last_name);
+      }
+
+      if (conditions.length > 0) {
+        const query = `SELECT * FROM typeform_applications WHERE ${conditions.join(' OR ')} ORDER BY created_at DESC LIMIT 1`;
+        const result = await pool.query(query, params);
+        if (result.rows.length > 0) {
+          typeformData = result.rows[0];
+        }
+      }
+    } catch (err) {
+      console.error('Error looking up Typeform data:', err);
+    }
+
+    // Look up linked SamCart data
+    let samcartData = null;
+    try {
+      let conditions = [];
+      let params = [];
+
+      if (member.email) {
+        conditions.push(`LOWER(email) = LOWER($${params.length + 1})`);
+        params.push(member.email);
+      }
+      if (member.phone) {
+        const cleanPhone = member.phone.replace(/\D/g, '');
+        if (cleanPhone.length >= 10) {
+          conditions.push(`REPLACE(REPLACE(REPLACE(phone, '-', ''), ' ', ''), '+', '') LIKE '%' || $${params.length + 1}`);
+          params.push(cleanPhone.slice(-10));
+        }
+      }
+      if (member.first_name && member.last_name) {
+        conditions.push(`(LOWER(first_name) = LOWER($${params.length + 1}) AND LOWER(last_name) = LOWER($${params.length + 2}))`);
+        params.push(member.first_name, member.last_name);
+      }
+
+      if (conditions.length > 0) {
+        const query = `SELECT * FROM samcart_orders WHERE ${conditions.join(' OR ')} ORDER BY created_at DESC LIMIT 1`;
+        const result = await pool.query(query, params);
+        if (result.rows.length > 0) {
+          samcartData = result.rows[0];
+        }
+      }
+    } catch (err) {
+      console.error('Error looking up SamCart data:', err);
+    }
+
+    res.json({
+      ...member,
+      team_members: teamResult.rows,
+      c_level_partners: partnersResult.rows,
+      onboarding_submissions: submissionsResult.rows,
+      typeform_application: typeformData,
+      samcart_order: samcartData
+    });
+  } catch (error) {
+    console.error('Error fetching unified profile:', error);
+    res.status(500).json({ error: 'Failed to fetch unified profile' });
+  }
+});
+
 // Delete business owner
 router.delete('/:id', async (req, res) => {
   try {

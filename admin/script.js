@@ -224,6 +224,12 @@ function formatActivityText(activity) {
             return `CSV imported: ${details.imported} ${details.type} records`;
         case 'typeform_sync':
             return `Typeform sync: ${details.synced} new applications`;
+        case 'new_payment':
+        case 'samcart_order':
+            const amount = details.amount ? `$${details.amount}` : '';
+            return `💳 Payment received: <strong>${details.name || 'Unknown'}</strong> ${amount ? `- ${amount}` : ''} ${details.product ? `(${details.product})` : ''}`;
+        case 'record_matched':
+            return `🔗 Records matched: <strong>${details.typeform_name || 'Typeform'}</strong> → <strong>${details.onboarding_name || 'Onboarding'}</strong>`;
         default:
             return activity.action.replace(/_/g, ' ');
     }
@@ -288,13 +294,6 @@ async function loadApplications() {
                     <td>
                         <div class="action-btns">
                             <button class="action-btn view" onclick="viewApplication('${app.id}')">View</button>
-                            ${app.status === 'new' ? `
-                                <button class="action-btn approve" onclick="updateApplicationStatus('${app.id}', 'reviewed')">Review</button>
-                            ` : ''}
-                            ${app.status === 'reviewed' ? `
-                                <button class="action-btn approve" onclick="convertApplication('${app.id}')">Approve</button>
-                                <button class="action-btn reject" onclick="updateApplicationStatus('${app.id}', 'rejected')">Reject</button>
-                            ` : ''}
                         </div>
                     </td>
                 </tr>
@@ -449,12 +448,16 @@ async function loadMembers() {
 }
 
 async function viewMember(id) {
+    closeAllKebabMenus();
     try {
-        const member = await fetchAPI(`/members/${id}`);
+        // Use unified endpoint to get all linked data
+        const member = await fetchAPI(`/members/${id}/unified`);
+
+        // Team members section
         let teamHtml = '';
         if (member.team_members && member.team_members.length > 0) {
             teamHtml = `
-                <h4 style="margin-top: 20px; margin-bottom: 12px; font-size: 0.9rem; color: var(--gray-600);">Team Members</h4>
+                <h4 style="margin-top: 20px; margin-bottom: 12px; font-size: 0.9rem; color: var(--gray-600);">👥 Team Members</h4>
                 ${member.team_members.map(tm => `
                     <div style="background: var(--gray-50); padding: 10px; border-radius: 6px; margin-bottom: 8px;">
                         <strong>${tm.first_name} ${tm.last_name}</strong> - ${tm.role || tm.title || 'N/A'}<br>
@@ -464,7 +467,38 @@ async function viewMember(id) {
             `;
         }
 
-        openModal(`${member.first_name} ${member.last_name}`, `
+        // Linked Typeform data section
+        let typeformHtml = '';
+        if (member.typeform_application) {
+            const tf = member.typeform_application;
+            typeformHtml = `
+                <h4 style="margin-top: 20px; margin-bottom: 12px; font-size: 0.9rem; color: var(--blue);">📝 Linked Typeform Application</h4>
+                <div style="background: #dbeafe; padding: 12px; border-radius: 8px; font-size: 0.85rem;">
+                    <div><strong>Business:</strong> ${tf.business_description || '-'}</div>
+                    <div><strong>Revenue:</strong> ${tf.annual_revenue || '-'}</div>
+                    <div><strong>Challenge:</strong> ${tf.main_challenge || '-'}</div>
+                    <div><strong>Why CA Pro:</strong> ${tf.why_ca_pro || '-'}</div>
+                    <div style="margin-top: 8px; color: var(--gray-500); font-size: 0.8rem;">Applied: ${formatDate(tf.created_at)}</div>
+                </div>
+            `;
+        }
+
+        // Linked SamCart data section
+        let samcartHtml = '';
+        if (member.samcart_order) {
+            const sc = member.samcart_order;
+            samcartHtml = `
+                <h4 style="margin-top: 20px; margin-bottom: 12px; font-size: 0.9rem; color: var(--green);">💳 Linked SamCart Order</h4>
+                <div style="background: #d1fae5; padding: 12px; border-radius: 8px; font-size: 0.85rem;">
+                    <div><strong>Product:</strong> ${sc.product_name || '-'}</div>
+                    <div><strong>Amount:</strong> ${sc.order_total ? `$${sc.order_total}` : '-'}</div>
+                    <div><strong>Status:</strong> ${sc.status || '-'}</div>
+                    <div style="margin-top: 8px; color: var(--gray-500); font-size: 0.8rem;">Purchased: ${formatDate(sc.created_at)}</div>
+                </div>
+            `;
+        }
+
+        openModal(`${member.first_name || ''} ${member.last_name || ''} - Unified Profile`, `
             <div class="detail-row">
                 <span class="detail-label">Business</span>
                 <span class="detail-value">${member.business_name || '-'}</span>
@@ -521,6 +555,8 @@ async function viewMember(id) {
                 <span class="detail-label">Status</span>
                 <span class="detail-value"><span class="status-badge ${member.onboarding_status}">${member.onboarding_status?.replace('_', ' ') || 'pending'}</span></span>
             </div>
+            ${typeformHtml}
+            ${samcartHtml}
             ${teamHtml}
         `);
     } catch (error) {

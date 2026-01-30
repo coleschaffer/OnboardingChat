@@ -306,14 +306,17 @@ router.post('/samcart', async (req, res) => {
       `, [orderData.email]);
     }
 
-    // Log activity
+    // Log activity - payment notification
+    const customerName = [orderData.first_name, orderData.last_name].filter(Boolean).join(' ') || orderData.email || 'Unknown';
     await pool.query(`
       INSERT INTO activity_log (action, entity_type, entity_id, details)
       VALUES ($1, $2, $3, $4)
-    `, ['samcart_order', 'order', result.rows[0].id, JSON.stringify({
+    `, ['new_payment', 'order', result.rows[0].id, JSON.stringify({
+      name: customerName,
       email: orderData.email,
       product: orderData.product_name,
-      event: eventType
+      amount: orderData.order_total,
+      currency: orderData.currency
     })]);
 
     console.log(`New SamCart order received: ${result.rows[0].id}`);
