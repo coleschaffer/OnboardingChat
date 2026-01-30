@@ -146,4 +146,122 @@ router.get('/typeform/test', (req, res) => {
   res.json({ message: 'Typeform webhook endpoint is active' });
 });
 
+// SamCart webhook handler
+router.post('/samcart', async (req, res) => {
+  try {
+    const pool = req.app.locals.pool;
+    const payload = req.body;
+
+    console.log('SamCart webhook received:', JSON.stringify(payload, null, 2));
+
+    // SamCart sends different event types
+    const eventType = payload.type || 'order'; // order, refund, subscription, etc.
+
+    // Extract customer data from SamCart payload
+    // SamCart typically sends: customer object with email, name, phone
+    const customer = payload.customer || {};
+    const order = payload.order || payload;
+
+    const orderData = {
+      samcart_order_id: order.id || order.order_id || null,
+      event_type: eventType,
+      email: customer.email || order.customer_email || order.email || null,
+      first_name: customer.first_name || order.customer_first_name || order.first_name || null,
+      last_name: customer.last_name || order.customer_last_name || order.last_name || null,
+      phone: customer.phone || order.customer_phone || order.phone || null,
+      product_name: order.product_name || order.product?.name || null,
+      product_id: order.product_id || order.product?.id || null,
+      order_total: order.total || order.order_total || null,
+      currency: order.currency || 'USD',
+      status: order.status || 'completed'
+    };
+
+    console.log('Parsed SamCart order:', orderData);
+
+    // Skip if no email (required for linking)
+    if (!orderData.email) {
+      console.warn('SamCart webhook missing email, storing anyway');
+    }
+
+    // Check if order already exists
+    if (orderData.samcart_order_id) {
+      const existing = await pool.query(
+        'SELECT id FROM samcart_orders WHERE samcart_order_id = $1',
+        [orderData.samcart_order_id]
+      );
+
+      if (existing.rows.length > 0) {
+        // Update existing order (e.g., status change)
+        await pool.query(`
+          UPDATE samcart_orders SET
+            event_type = $1,
+            status = $2,
+            raw_data = $3,
+            updated_at = CURRENT_TIMESTAMP
+          WHERE samcart_order_id = $4
+        `, [eventType, orderData.status, JSON.stringify(payload), orderData.samcart_order_id]);
+
+        console.log(`Updated SamCart order: ${orderData.samcart_order_id}`);
+        return res.status(200).json({ success: true, message: 'Order updated' });
+      }
+    }
+
+    // Insert new order
+    const result = await pool.query(`
+      INSERT INTO samcart_orders (
+        samcart_order_id, event_type, email, first_name, last_name, phone,
+        product_name, product_id, order_total, currency, status, raw_data
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      RETURNING id
+    `, [
+      orderData.samcart_order_id,
+      orderData.event_type,
+      orderData.email,
+      orderData.first_name,
+      orderData.last_name,
+      orderData.phone,
+      orderData.product_name,
+      orderData.product_id,
+      orderData.order_total,
+      orderData.currency,
+      orderData.status,
+      JSON.stringify(payload)
+    ]);
+
+    // Try to link to Typeform application by email
+    if (orderData.email) {
+      await pool.query(`
+        UPDATE typeform_applications
+        SET status = 'approved', updated_at = CURRENT_TIMESTAMP
+        WHERE LOWER(email) = LOWER($1) AND status = 'new'
+      `, [orderData.email]);
+    }
+
+    // Log activity
+    await pool.query(`
+      INSERT INTO activity_log (action, entity_type, entity_id, details)
+      VALUES ($1, $2, $3, $4)
+    `, ['samcart_order', 'order', result.rows[0].id, JSON.stringify({
+      email: orderData.email,
+      product: orderData.product_name,
+      event: eventType
+    })]);
+
+    console.log(`New SamCart order received: ${result.rows[0].id}`);
+
+    res.status(200).json({
+      success: true,
+      order_id: result.rows[0].id
+    });
+  } catch (error) {
+    console.error('Error processing SamCart webhook:', error);
+    res.status(500).json({ error: 'Failed to process webhook' });
+  }
+});
+
+// Test endpoint for SamCart webhook
+router.get('/samcart/test', (req, res) => {
+  res.json({ message: 'SamCart webhook endpoint is active' });
+});
+
 module.exports = router;

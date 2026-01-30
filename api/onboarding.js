@@ -16,6 +16,8 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
 
   // Try to find Typeform data by email or phone
   let typeformData = null;
+  let samcartData = null;
+
   if (pool && (answers.email || answers.phone)) {
     try {
       let query = 'SELECT * FROM typeform_applications WHERE ';
@@ -42,6 +44,33 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
       }
     } catch (err) {
       console.error('Error looking up Typeform data:', err);
+    }
+
+    // Also look up SamCart order data
+    try {
+      let query = 'SELECT * FROM samcart_orders WHERE ';
+      let params = [];
+      let conditions = [];
+
+      if (answers.email) {
+        conditions.push(`LOWER(email) = LOWER($${params.length + 1})`);
+        params.push(answers.email);
+      }
+      if (answers.phone) {
+        const cleanPhone = answers.phone.replace(/\D/g, '');
+        conditions.push(`REPLACE(REPLACE(REPLACE(phone, '-', ''), ' ', ''), '+', '') LIKE '%' || $${params.length + 1}`);
+        params.push(cleanPhone.slice(-10));
+      }
+
+      query += conditions.join(' OR ') + ' ORDER BY created_at DESC LIMIT 1';
+      const result = await pool.query(query, params);
+
+      if (result.rows.length > 0) {
+        samcartData = result.rows[0];
+        console.log('Found matching SamCart data for:', samcartData.email || samcartData.phone);
+      }
+    } catch (err) {
+      console.error('Error looking up SamCart data:', err);
     }
   }
 
@@ -128,7 +157,32 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
     await new Promise(resolve => setTimeout(resolve, 500));
   }
 
-  // Message 2: Onboarding Chat Data
+  // Message 2: SamCart Purchase Data (if available)
+  if (samcartData) {
+    const samcartFields = [
+      `*Product:* ${samcartData.product_name || 'N/A'}`,
+      `*Order Total:* ${samcartData.order_total ? `$${samcartData.order_total}` : 'N/A'}`,
+      `*Order ID:* ${samcartData.samcart_order_id || 'N/A'}`,
+      `*Status:* ${samcartData.status || 'N/A'}`,
+      `*Email:* ${samcartData.email || 'N/A'}`,
+      `*Name:* ${[samcartData.first_name, samcartData.last_name].filter(Boolean).join(' ') || 'N/A'}`
+    ];
+
+    await sendMessage([
+      {
+        type: 'header',
+        text: { type: 'plain_text', text: `💳 SamCart Purchase: ${memberName}`, emoji: true }
+      },
+      {
+        type: 'section',
+        text: { type: 'mrkdwn', text: samcartFields.join('\n\n') }
+      }
+    ], `SamCart data for ${memberName}`);
+
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+
+  // Message 3: Onboarding Chat Data
   const onboardingFields = [
     `*Business Name:* ${memberData.businessName || 'N/A'}`,
     `*Team Size:* ${memberData.teamCount || 'N/A'}`,
