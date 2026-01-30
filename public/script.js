@@ -2,6 +2,17 @@
 
 const STORAGE_KEY = 'ca_pro_onboarding';
 
+// Get URL parameters (email, phone from SamCart redirect)
+function getUrlParams() {
+    const params = new URLSearchParams(window.location.search);
+    return {
+        email: params.get('email') || '',
+        phone: params.get('phone') || '',
+        firstName: params.get('first_name') || params.get('firstName') || '',
+        lastName: params.get('last_name') || params.get('lastName') || ''
+    };
+}
+
 // Generate or retrieve session ID
 function getSessionId() {
     const saved = localStorage.getItem(STORAGE_KEY);
@@ -39,11 +50,20 @@ function saveLocalProgress() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
 }
 
+// Get customer info from URL (passed from SamCart)
+const urlParams = getUrlParams();
+
 // State Management
 const state = {
     sessionId: getSessionId(),
     currentQuestion: 0,
-    answers: {},
+    answers: {
+        // Pre-populate with URL params if available
+        email: urlParams.email,
+        phone: urlParams.phone,
+        firstName: urlParams.firstName,
+        lastName: urlParams.lastName
+    },
     teamMembers: [],
     cLevelPartners: [],
     isTyping: false,

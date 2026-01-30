@@ -14,15 +14,45 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
     return;
   }
 
-  // Try to find Typeform data by email (if we have email from answers or can find it)
+  // Try to find Typeform data by email or phone
   let typeformData = null;
-  // Note: The onboarding chat doesn't collect email, so we can't match Typeform data yet
-  // This would need email to be passed from SamCart redirect or collected in the chat
+  if (pool && (answers.email || answers.phone)) {
+    try {
+      let query = 'SELECT * FROM typeform_applications WHERE ';
+      let params = [];
+      let conditions = [];
 
-  // Build member data from chat answers
+      if (answers.email) {
+        conditions.push(`LOWER(email) = LOWER($${params.length + 1})`);
+        params.push(answers.email);
+      }
+      if (answers.phone) {
+        // Clean phone number for comparison (remove non-digits)
+        const cleanPhone = answers.phone.replace(/\D/g, '');
+        conditions.push(`REPLACE(REPLACE(REPLACE(phone, '-', ''), ' ', ''), '+', '') LIKE '%' || $${params.length + 1}`);
+        params.push(cleanPhone.slice(-10)); // Last 10 digits
+      }
+
+      query += conditions.join(' OR ') + ' ORDER BY created_at DESC LIMIT 1';
+      const result = await pool.query(query, params);
+
+      if (result.rows.length > 0) {
+        typeformData = result.rows[0];
+        console.log('Found matching Typeform data for:', typeformData.email || typeformData.phone);
+      }
+    } catch (err) {
+      console.error('Error looking up Typeform data:', err);
+    }
+  }
+
+  // Build member data from chat answers AND Typeform data
   const memberData = {
-    firstName: answers.firstName || '',
-    lastName: answers.lastName || '',
+    // Prefer Typeform data for name (since chat doesn't collect it)
+    firstName: typeformData?.first_name || answers.firstName || '',
+    lastName: typeformData?.last_name || answers.lastName || '',
+    email: typeformData?.email || answers.email || '',
+    phone: typeformData?.phone || answers.phone || '',
+    // Chat data
     businessName: answers.businessName || '',
     businessOverview: answers.bio || '',
     massiveWin: answers.massiveWin || '',
@@ -30,7 +60,12 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
     trafficSources: answers.trafficSources || '',
     landingPages: answers.landingPages || '',
     aiSkillLevel: answers.aiSkillLevel || '',
-    bio: answers.bio || ''
+    bio: answers.bio || '',
+    // Typeform-specific fields
+    typeformBusinessDescription: typeformData?.business_description || '',
+    typeformAnnualRevenue: typeformData?.annual_revenue || '',
+    typeformMainChallenge: typeformData?.main_challenge || '',
+    typeformWhyCaPro: typeformData?.why_ca_pro || ''
   };
 
   console.log('Sending Slack welcome for:', memberData.businessName);
@@ -51,7 +86,8 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
   }
 
   const channelId = openData.channel.id;
-  const memberName = memberData.businessName || 'New Member';
+  const fullName = [memberData.firstName, memberData.lastName].filter(Boolean).join(' ');
+  const memberName = fullName || memberData.businessName || 'New Member';
 
   // Helper to send a message
   async function sendMessage(blocks, text) {
@@ -66,7 +102,33 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
     return response.json();
   }
 
-  // Message 1: Onboarding Chat Data
+  // Message 1: Typeform Application Data (if available)
+  if (typeformData) {
+    const typeformFields = [
+      `*Name:* ${fullName || 'N/A'}`,
+      `*Email:* ${memberData.email || 'N/A'}`,
+      `*Phone:* ${memberData.phone || 'N/A'}`,
+      `*Business Description:* ${memberData.typeformBusinessDescription || 'N/A'}`,
+      `*Annual Revenue:* ${memberData.typeformAnnualRevenue || 'N/A'}`,
+      `*Main Challenge:* ${memberData.typeformMainChallenge || 'N/A'}`,
+      `*Why CA Pro:* ${memberData.typeformWhyCaPro || 'N/A'}`
+    ];
+
+    await sendMessage([
+      {
+        type: 'header',
+        text: { type: 'plain_text', text: `📝 Typeform Application: ${memberName}`, emoji: true }
+      },
+      {
+        type: 'section',
+        text: { type: 'mrkdwn', text: typeformFields.join('\n\n') }
+      }
+    ], `Typeform data for ${memberName}`);
+
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+
+  // Message 2: Onboarding Chat Data
   const onboardingFields = [
     `*Business Name:* ${memberData.businessName || 'N/A'}`,
     `*Team Size:* ${memberData.teamCount || 'N/A'}`,
@@ -90,11 +152,7 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
   await sendMessage([
     {
       type: 'header',
-      text: { type: 'plain_text', text: `📋 New CA Pro Member: ${memberName}`, emoji: true }
-    },
-    {
-      type: 'section',
-      text: { type: 'mrkdwn', text: '*Onboarding Chat Responses:*' }
+      text: { type: 'plain_text', text: `📋 Onboarding Chat: ${memberData.businessName || memberName}`, emoji: true }
     },
     {
       type: 'section',
@@ -148,45 +206,55 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
 // Generate welcome message using Claude
 async function generateWelcomeMessage(memberData) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
+  const fullName = [memberData.firstName, memberData.lastName].filter(Boolean).join(' ');
+  const displayName = fullName || memberData.businessName || 'our newest member';
+
   if (!apiKey) {
-    return `Welcome to CA Pro! We're excited to have ${memberData.businessName || 'you'} in the community.`;
+    return `Welcome to CA Pro! We're excited to have ${displayName} in the community.`;
   }
 
   const prompt = `You are writing a welcome message for a new CA Pro member to be posted in a WhatsApp group.
 
 Here is the member's information:
+- Name: ${fullName || 'Not provided'}
 - Business Name: ${memberData.businessName || 'Not provided'}
-- About them/Bio: ${memberData.businessOverview || 'Not provided'}
+- Business Description (from application): ${memberData.typeformBusinessDescription || 'Not provided'}
+- About them/Bio: ${memberData.businessOverview || memberData.bio || 'Not provided'}
 - What they want to achieve (massive win): ${memberData.massiveWin || 'Not provided'}
+- Why they joined CA Pro: ${memberData.typeformWhyCaPro || 'Not provided'}
+- Main Challenge: ${memberData.typeformMainChallenge || 'Not provided'}
 - Team Count: ${memberData.teamCount || 'Not provided'}
 - Traffic Sources: ${memberData.trafficSources || 'Not provided'}
+- Annual Revenue: ${memberData.typeformAnnualRevenue || 'Not provided'}
 
 Write a warm, professional welcome message similar to these examples:
 
 Example 1:
-"Hey guys, please join me in extending a warm welcome to our newest CA Pro Member, Michele! He is the co-founder of an anti-age skincare brand for men made in Italy.
+"Hey guys, please join me in extending a warm welcome to our newest CA Pro Member, Michele Monacommi! He is the co-founder of an anti-age skincare brand for men made in Italy, selling in both Italy and the US market.
 
-Michele is joining CA Pro to increase creative output and become more efficient with AI.
+Michele is joining CA Pro to increase creative output and become more efficient with AI, as he currently handles most of the creative development with his business partner.
 
 We're thrilled to have Michele in the CA Pro community and excited to support his growth.
 Welcome Michele!"
 
 Example 2:
-"Hey Everyone!
+"Hey guys, please join me in extending a warm welcome to our newest CA Pro Member, Collin Schmelebeck!
 
-Please join me in giving a warm welcome to our newest CA Pro member!
+Collin is a Google Ads specialist who helps Meta-driven DTC brands build independent acquisition channels on Google and YouTube without relying solely on Meta to scale.
 
-They run ${memberData.businessName || 'their business'} and are focused on growth.
+He's joining CA Pro to speed up his entire ad lander process and create complete systems that let him deliver better results for his clients faster than competitors.
 
-We're excited to have you here and looking forward to supporting you on this journey!"
+We're excited to have Collin in the CA Pro community and to support his growth. Welcome Collin!"
 
 Guidelines:
-- Start with "Hey guys, please join me in extending a warm welcome..." or similar
-- Use business name since we may not have their personal name
+- Start with "Hey guys, please join me in extending a warm welcome to our newest CA Pro Member, [Name]!"
+- Use their actual name if available, otherwise use business name
+- Describe what they do / their business in 1-2 sentences
 - Mention why they're joining/what they hope to achieve
-- End with a warm welcome
+- End with a warm welcome using their first name
 - Keep it 2-3 short paragraphs
 - Be genuine and enthusiastic but not over the top
+- Use the most relevant and interesting details from their application
 
 Write ONLY the welcome message, no additional commentary.`;
 
