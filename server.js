@@ -69,11 +69,48 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
+// Run migrations on startup
+async function runMigrations() {
+  try {
+    // Create samcart_orders table if it doesn't exist
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS samcart_orders (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        samcart_order_id VARCHAR(255) UNIQUE,
+        event_type VARCHAR(50) DEFAULT 'order',
+        email VARCHAR(255),
+        first_name VARCHAR(255),
+        last_name VARCHAR(255),
+        phone VARCHAR(50),
+        product_name VARCHAR(500),
+        product_id VARCHAR(255),
+        order_total DECIMAL(10, 2),
+        currency VARCHAR(10) DEFAULT 'USD',
+        status VARCHAR(50) DEFAULT 'completed',
+        raw_data JSONB,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create indexes
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_samcart_orders_email ON samcart_orders(LOWER(email))`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_samcart_orders_samcart_id ON samcart_orders(samcart_order_id)`);
+
+    console.log('Database migrations completed');
+  } catch (error) {
+    console.error('Migration error:', error);
+  }
+}
+
 // Start server
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Chat interface: http://localhost:${PORT}`);
   console.log(`Admin dashboard: http://localhost:${PORT}/admin`);
+
+  // Run migrations after server starts
+  await runMigrations();
 });
 
 // Graceful shutdown
