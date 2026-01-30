@@ -3,36 +3,185 @@ const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 
 // Helper to send Slack welcome message
-async function sendSlackWelcome(answers) {
+async function sendSlackWelcome(answers, teamMembers) {
+  const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
+  const SLACK_WELCOME_USER_ID = process.env.SLACK_WELCOME_USER_ID;
+
   // Skip if Slack is not configured
-  if (!process.env.SLACK_BOT_TOKEN) {
+  if (!SLACK_BOT_TOKEN || !SLACK_WELCOME_USER_ID) {
     console.log('Slack not configured, skipping welcome message');
     return;
   }
 
+  // Build member data from chat answers
   const memberData = {
     firstName: answers.firstName || '',
     lastName: answers.lastName || '',
     businessName: answers.businessName || '',
-    businessOverview: answers.businessOverview || '',
+    businessOverview: answers.bio || '', // Use bio as business overview
     massiveWin: answers.massiveWin || '',
     teamCount: answers.teamCount || '',
     trafficSources: answers.trafficSources || ''
   };
 
-  // Call our own Slack endpoint
-  const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
-  const response = await fetch(`${baseUrl}/api/slack/send-welcome`, {
+  console.log('Sending Slack welcome for:', memberData.businessName);
+
+  // Generate welcome message using Claude
+  const welcomeMessage = await generateWelcomeMessage(memberData);
+
+  // Open DM channel with the welcome user
+  const openResponse = await fetch('https://slack.com/api/conversations.open', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ memberData })
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SLACK_BOT_TOKEN}`
+    },
+    body: JSON.stringify({ users: SLACK_WELCOME_USER_ID })
   });
 
-  if (!response.ok) {
-    throw new Error(`Slack API returned ${response.status}`);
+  const openData = await openResponse.json();
+  if (!openData.ok) {
+    throw new Error(`Failed to open DM: ${openData.error}`);
+  }
+
+  const channelId = openData.channel.id;
+  const memberName = memberData.businessName || 'New Member';
+
+  // Send message with buttons
+  const msgResponse = await fetch('https://slack.com/api/chat.postMessage', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SLACK_BOT_TOKEN}`
+    },
+    body: JSON.stringify({
+      channel: channelId,
+      blocks: [
+        {
+          type: 'header',
+          text: {
+            type: 'plain_text',
+            text: `Welcome Message for ${memberName}`,
+            emoji: true
+          }
+        },
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: welcomeMessage
+          }
+        },
+        {
+          type: 'divider'
+        },
+        {
+          type: 'actions',
+          elements: [
+            {
+              type: 'button',
+              text: {
+                type: 'plain_text',
+                text: '📋 Copy Message',
+                emoji: true
+              },
+              action_id: 'copy_message',
+              style: 'primary'
+            },
+            {
+              type: 'button',
+              text: {
+                type: 'plain_text',
+                text: '✏️ Edit Message',
+                emoji: true
+              },
+              action_id: 'edit_message'
+            }
+          ]
+        }
+      ],
+      text: `Welcome message for ${memberName}`
+    })
+  });
+
+  const msgData = await msgResponse.json();
+  if (!msgData.ok) {
+    throw new Error(`Failed to send message: ${msgData.error}`);
   }
 
   console.log('Slack welcome message sent successfully');
+}
+
+// Generate welcome message using Claude
+async function generateWelcomeMessage(memberData) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return `Welcome to CA Pro! We're excited to have ${memberData.businessName || 'you'} in the community.`;
+  }
+
+  const prompt = `You are writing a welcome message for a new CA Pro member to be posted in a WhatsApp group.
+
+Here is the member's information:
+- Business Name: ${memberData.businessName || 'Not provided'}
+- About them/Bio: ${memberData.businessOverview || 'Not provided'}
+- What they want to achieve (massive win): ${memberData.massiveWin || 'Not provided'}
+- Team Count: ${memberData.teamCount || 'Not provided'}
+- Traffic Sources: ${memberData.trafficSources || 'Not provided'}
+
+Write a warm, professional welcome message similar to these examples:
+
+Example 1:
+"Hey guys, please join me in extending a warm welcome to our newest CA Pro Member, Michele! He is the co-founder of an anti-age skincare brand for men made in Italy.
+
+Michele is joining CA Pro to increase creative output and become more efficient with AI.
+
+We're thrilled to have Michele in the CA Pro community and excited to support his growth.
+Welcome Michele!"
+
+Example 2:
+"Hey Everyone!
+
+Please join me in giving a warm welcome to our newest CA Pro member!
+
+They run ${memberData.businessName || 'their business'} and are focused on growth.
+
+We're excited to have you here and looking forward to supporting you on this journey!"
+
+Guidelines:
+- Start with "Hey guys, please join me in extending a warm welcome..." or similar
+- Use business name since we may not have their personal name
+- Mention why they're joining/what they hope to achieve
+- End with a warm welcome
+- Keep it 2-3 short paragraphs
+- Be genuine and enthusiastic but not over the top
+
+Write ONLY the welcome message, no additional commentary.`;
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 500,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Claude API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data.content[0]?.text || `Welcome to CA Pro, ${memberData.businessName}!`;
+  } catch (error) {
+    console.error('Error generating welcome message:', error);
+    return `Welcome to CA Pro! We're excited to have ${memberData.businessName || 'you'} in the community.`;
+  }
 }
 
 // Save progress (partial or complete)

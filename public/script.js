@@ -160,7 +160,9 @@ async function saveProgress(isComplete = false) {
     if (isComplete) state.isComplete = true;
     saveLocalProgress();
 
-    if (state.isSaving) return;
+    // For completion saves, always proceed (don't skip if another save is in progress)
+    // For regular saves, skip if already saving to avoid duplicate requests
+    if (state.isSaving && !isComplete) return;
     state.isSaving = true;
 
     try {
