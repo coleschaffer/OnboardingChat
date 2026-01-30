@@ -191,8 +191,15 @@ document.addEventListener('DOMContentLoaded', () => {
     // Launch confetti on page load
     launchConfetti();
 
-    // Start directly with first question (no separate welcome message)
-    showQuestion(0);
+    // Show welcome message then first question
+    showTyping();
+    setTimeout(() => {
+        addBotMessage("Hey there! 👋 I'm here to help you complete your CA Pro onboarding. Let's get you set up!");
+        // Brief pause then show first question
+        setTimeout(() => {
+            showQuestion(0);
+        }, 400);
+    }, 500);
 });
 
 // Progress Update
