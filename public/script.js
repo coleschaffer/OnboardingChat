@@ -791,7 +791,7 @@ function renderTeamEntryInput(question) {
             <div class="input-row">
                 <input type="email" placeholder="Email Address *" value="${member.email || ''}"
                     onchange="updateTeamMember(${index}, 'email', this.value)">
-                <input type="tel" placeholder="Phone Number *" value="${member.phone || ''}"
+                <input type="tel" placeholder="Phone (optional)" value="${member.phone || ''}"
                     onchange="updateTeamMember(${index}, 'phone', this.value)">
             </div>
             <button class="remove-btn" onclick="removeTeamMember(${index})">Remove</button>
@@ -841,7 +841,7 @@ function handleTeamEntrySubmit(questionId) {
     if (members.length > 0) {
         let hasError = false;
         members.forEach((m, index) => {
-            if (!m.name || !m.email || !m.phone) {
+            if (!m.name || !m.email) {
                 hasError = true;
                 // Highlight empty fields
                 const card = document.querySelectorAll('.team-member-card')[index];
@@ -892,7 +892,7 @@ function renderPartnerEntryInput(question) {
             <div class="input-row">
                 <input type="email" placeholder="Email Address *" value="${partner.email || ''}"
                     onchange="updatePartner(${index}, 'email', this.value)">
-                <input type="tel" placeholder="Phone Number *" value="${partner.phone || ''}"
+                <input type="tel" placeholder="Phone (optional)" value="${partner.phone || ''}"
                     onchange="updatePartner(${index}, 'phone', this.value)">
             </div>
             <button class="remove-btn" onclick="removePartner(${index})">Remove</button>
@@ -942,7 +942,7 @@ function handlePartnerEntrySubmit(questionId) {
     if (partners.length > 0) {
         let hasError = false;
         partners.forEach((p, index) => {
-            if (!p.name || !p.email || !p.phone) {
+            if (!p.name || !p.email) {
                 hasError = true;
                 // Highlight empty fields
                 const card = document.querySelectorAll('.team-member-card')[index];
