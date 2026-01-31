@@ -251,24 +251,45 @@ async function syncTeamMembersToCircle(teamMembers, pool = null) {
     }
   }
 
-  // Log failures to activity_log if we have a pool
-  if (pool && results.errors.length > 0) {
+  // Log to activity_log if we have a pool
+  if (pool) {
     try {
-      await pool.query(`
-        INSERT INTO activity_log (action, entity_type, entity_id, details)
-        VALUES ($1, $2, $3, $4)
-      `, [
-        'circle_sync_failed',
-        'team_member',
-        null,
-        JSON.stringify({
-          type: 'team_members',
-          errors: results.errors,
-          total_attempted: teamMembers.length
-        })
-      ]);
+      // Log successes
+      if (results.synced > 0) {
+        const syncedEmails = teamMembers.filter(m => m.email).map(m => m.email);
+        await pool.query(`
+          INSERT INTO activity_log (action, entity_type, entity_id, details)
+          VALUES ($1, $2, $3, $4)
+        `, [
+          'circle_team_member_synced',
+          'team_member',
+          null,
+          JSON.stringify({
+            count: teamMembers.length,
+            emails: syncedEmails,
+            communities: ['CA', 'SPG']
+          })
+        ]);
+      }
+
+      // Log failures
+      if (results.errors.length > 0) {
+        await pool.query(`
+          INSERT INTO activity_log (action, entity_type, entity_id, details)
+          VALUES ($1, $2, $3, $4)
+        `, [
+          'circle_sync_failed',
+          'team_member',
+          null,
+          JSON.stringify({
+            type: 'team_members',
+            errors: results.errors,
+            total_attempted: teamMembers.length
+          })
+        ]);
+      }
     } catch (logError) {
-      console.error('[Circle] Failed to log sync errors:', logError.message);
+      console.error('[Circle] Failed to log activity:', logError.message);
     }
   }
 
@@ -341,24 +362,45 @@ async function syncPartnersToCircle(partners, pool = null) {
     }
   }
 
-  // Log failures to activity_log if we have a pool
-  if (pool && results.errors.length > 0) {
+  // Log to activity_log if we have a pool
+  if (pool) {
     try {
-      await pool.query(`
-        INSERT INTO activity_log (action, entity_type, entity_id, details)
-        VALUES ($1, $2, $3, $4)
-      `, [
-        'circle_sync_failed',
-        'partner',
-        null,
-        JSON.stringify({
-          type: 'partners',
-          errors: results.errors,
-          total_attempted: partners.length
-        })
-      ]);
+      // Log successes
+      if (results.synced > 0) {
+        const syncedEmails = partners.filter(p => p.email).map(p => p.email);
+        await pool.query(`
+          INSERT INTO activity_log (action, entity_type, entity_id, details)
+          VALUES ($1, $2, $3, $4)
+        `, [
+          'circle_partner_synced',
+          'partner',
+          null,
+          JSON.stringify({
+            count: partners.length,
+            emails: syncedEmails,
+            communities: ['CA', 'SPG']
+          })
+        ]);
+      }
+
+      // Log failures
+      if (results.errors.length > 0) {
+        await pool.query(`
+          INSERT INTO activity_log (action, entity_type, entity_id, details)
+          VALUES ($1, $2, $3, $4)
+        `, [
+          'circle_sync_failed',
+          'partner',
+          null,
+          JSON.stringify({
+            type: 'partners',
+            errors: results.errors,
+            total_attempted: partners.length
+          })
+        ]);
+      }
     } catch (logError) {
-      console.error('[Circle] Failed to log sync errors:', logError.message);
+      console.error('[Circle] Failed to log activity:', logError.message);
     }
   }
 

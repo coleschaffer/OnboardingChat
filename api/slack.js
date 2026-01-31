@@ -410,36 +410,49 @@ router.post('/events', verifySlackSignature, async (req, res) => {
                 return;
             }
 
-            // Find the welcome message (look for the one with welcome_message metadata or "Generated Welcome Message" header)
-            let originalWelcome = null;
+            // Find the MOST RECENT welcome message from the bot (for iterative editing)
+            // We need to get the last edited version, not the original
+            let latestWelcome = null;
             let memberData = {};
 
+            // First, get member data from the original welcome message with metadata
             for (const msg of historyData.messages) {
-                // Check if this is the welcome message by looking at metadata or header
                 const hasWelcomeMetadata = msg.metadata?.event_type === 'welcome_message';
-                const hasWelcomeHeader = msg.blocks?.find(b =>
-                    b.type === 'header' && b.text?.text?.includes('Generated Welcome Message')
-                );
-
-                if (hasWelcomeMetadata || hasWelcomeHeader) {
-                    // Extract the welcome text from section block
-                    originalWelcome = msg.blocks?.find(b => b.type === 'section')?.text?.text;
-
-                    // Extract member data from metadata if available
-                    if (msg.metadata?.event_payload) {
-                        memberData = msg.metadata.event_payload;
-                    }
+                if (hasWelcomeMetadata && msg.metadata?.event_payload) {
+                    memberData = msg.metadata.event_payload;
                     break;
                 }
             }
 
-            if (!originalWelcome) {
+            // Now find the LAST bot message with a welcome (iterate in reverse order)
+            // This ensures we edit the most recently generated version
+            for (let i = historyData.messages.length - 1; i >= 0; i--) {
+                const msg = historyData.messages[i];
+
+                // Skip user messages (only look at bot messages)
+                if (!msg.bot_id && msg.user !== 'USLACKBOT') continue;
+
+                // Check if this is a welcome message (has section with text)
+                const sectionBlock = msg.blocks?.find(b => b.type === 'section' && b.text?.text);
+                if (sectionBlock) {
+                    // Skip if this is just a "Note" or other non-welcome message
+                    const text = sectionBlock.text.text;
+                    if (text.includes('⚠️') || text.includes('Note:')) continue;
+
+                    // This is likely a welcome message
+                    latestWelcome = text;
+                    console.log(`[Slack] Found latest welcome message (message ${i + 1} of ${historyData.messages.length})`);
+                    break;
+                }
+            }
+
+            if (!latestWelcome) {
                 // Fallback: try the parent message section
                 const parentMessage = historyData.messages[0];
-                originalWelcome = parentMessage?.blocks?.find(b => b.type === 'section')?.text?.text;
+                latestWelcome = parentMessage?.blocks?.find(b => b.type === 'section')?.text?.text;
 
-                if (!originalWelcome) {
-                    console.error('Could not find original welcome message');
+                if (!latestWelcome) {
+                    console.error('Could not find any welcome message in thread');
                     return;
                 }
             }
@@ -447,7 +460,7 @@ router.post('/events', verifySlackSignature, async (req, res) => {
             console.log('Editing welcome message with context:', Object.keys(memberData).length, 'fields');
 
             // Generate edited message with full member context
-            let editedMessage = await editWelcomeMessage(originalWelcome, editRequest, memberData);
+            let editedMessage = await editWelcomeMessage(latestWelcome, editRequest, memberData);
 
             // Strip leading/trailing quotes if Claude wrapped the message in them
             editedMessage = editedMessage.replace(/^["']|["']$/g, '').trim();

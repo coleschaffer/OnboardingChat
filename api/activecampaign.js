@@ -189,18 +189,48 @@ async function syncSingleContact(contact, type, pool = null) {
 async function syncTeamMembers(teamMembers, pool = null) {
   if (!isConfigured()) {
     console.log('ActiveCampaign: Not configured, skipping team member sync');
-    return;
+    return { synced: 0, errors: [] };
   }
 
   if (!teamMembers || teamMembers.length === 0) {
-    return;
+    return { synced: 0, errors: [] };
   }
 
   console.log(`ActiveCampaign: Syncing ${teamMembers.length} team member(s)`);
 
+  const results = { synced: 0, errors: [] };
+
   for (const member of teamMembers) {
-    await syncSingleContact(member, 'teamMember', pool);
+    const result = await syncSingleContact(member, 'teamMember', pool);
+    if (result.success) {
+      results.synced++;
+    } else {
+      results.errors.push({ email: member.email, error: result.error });
+    }
   }
+
+  // Log success to activity_log if we have a pool and synced contacts
+  if (pool && results.synced > 0) {
+    try {
+      const syncedEmails = teamMembers.filter(m => m.email).map(m => m.email);
+      await pool.query(`
+        INSERT INTO activity_log (action, entity_type, entity_id, details)
+        VALUES ($1, $2, $3, $4)
+      `, [
+        'activecampaign_team_member_synced',
+        'team_member',
+        null,
+        JSON.stringify({
+          count: results.synced,
+          emails: syncedEmails
+        })
+      ]);
+    } catch (logError) {
+      console.error('ActiveCampaign: Failed to log sync success:', logError.message);
+    }
+  }
+
+  return results;
 }
 
 /**
@@ -211,18 +241,48 @@ async function syncTeamMembers(teamMembers, pool = null) {
 async function syncPartners(partners, pool = null) {
   if (!isConfigured()) {
     console.log('ActiveCampaign: Not configured, skipping partner sync');
-    return;
+    return { synced: 0, errors: [] };
   }
 
   if (!partners || partners.length === 0) {
-    return;
+    return { synced: 0, errors: [] };
   }
 
   console.log(`ActiveCampaign: Syncing ${partners.length} partner(s)`);
 
+  const results = { synced: 0, errors: [] };
+
   for (const partner of partners) {
-    await syncSingleContact(partner, 'partner', pool);
+    const result = await syncSingleContact(partner, 'partner', pool);
+    if (result.success) {
+      results.synced++;
+    } else {
+      results.errors.push({ email: partner.email, error: result.error });
+    }
   }
+
+  // Log success to activity_log if we have a pool and synced contacts
+  if (pool && results.synced > 0) {
+    try {
+      const syncedEmails = partners.filter(p => p.email).map(p => p.email);
+      await pool.query(`
+        INSERT INTO activity_log (action, entity_type, entity_id, details)
+        VALUES ($1, $2, $3, $4)
+      `, [
+        'activecampaign_partner_synced',
+        'partner',
+        null,
+        JSON.stringify({
+          count: results.synced,
+          emails: syncedEmails
+        })
+      ]);
+    } catch (logError) {
+      console.error('ActiveCampaign: Failed to log sync success:', logError.message);
+    }
+  }
+
+  return results;
 }
 
 /**

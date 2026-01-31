@@ -192,6 +192,7 @@ function renderActivityFeed(activities) {
 function getActivityIcon(action) {
     if (action.includes('created') || action.includes('new')) return 'new';
     if (action.includes('import')) return 'import';
+    if (action.includes('circle') || action.includes('activecampaign')) return 'sync';
     return 'update';
 }
 
@@ -201,6 +202,9 @@ function getActivitySVG(action) {
     }
     if (action.includes('import')) {
         return '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>';
+    }
+    if (action.includes('circle') || action.includes('activecampaign')) {
+        return '<path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>';
     }
     return '<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>';
 }
@@ -232,6 +236,18 @@ function formatActivityText(activity) {
             return `🔗 Records matched: <strong>${details.typeform_name || 'Typeform'}</strong> → <strong>${details.onboarding_name || 'Onboarding'}</strong>`;
         case 'delayed_welcome_sent':
             return `⏰ Delayed welcome sent: <strong>${details.name || 'Unknown'}</strong> (${details.reason || 'OnboardingChat not completed'})`;
+        case 'circle_team_member_synced':
+            return `🔵 Circle: ${details.count || 1} team member(s) synced to communities`;
+        case 'circle_partner_synced':
+            return `🔵 Circle: ${details.count || 1} partner(s) synced to communities`;
+        case 'circle_sync_failed':
+            return `❌ Circle sync failed: ${details.errors?.length || 1} error(s) for ${details.type || 'contacts'}`;
+        case 'activecampaign_team_member_synced':
+            return `📧 ActiveCampaign: ${details.count || 1} team member(s) synced`;
+        case 'activecampaign_partner_synced':
+            return `📧 ActiveCampaign: ${details.count || 1} partner(s) synced`;
+        case 'activecampaign_sync_failed':
+            return `❌ ActiveCampaign sync failed: <strong>${details.email || 'Unknown'}</strong>`;
         default:
             return activity.action.replace(/_/g, ' ');
     }
