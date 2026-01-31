@@ -46,6 +46,7 @@ app.use('/api/import', require('./api/import'));
 app.use('/api/stats', require('./api/stats'));
 app.use('/api', require('./api/validate'));
 app.use('/api/slack', require('./api/slack'));
+app.use('/api/jobs', require('./api/jobs'));
 
 // Serve admin dashboard
 app.use('/admin', express.static(path.join(__dirname, 'admin')));
@@ -96,6 +97,25 @@ async function runMigrations() {
     // Create indexes
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_samcart_orders_email ON samcart_orders(LOWER(email))`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_samcart_orders_samcart_id ON samcart_orders(samcart_order_id)`);
+
+    // Add welcome_sent columns to samcart_orders for delayed welcome feature
+    await pool.query(`
+      DO $$
+      BEGIN
+        -- welcome_sent flag (false until welcome message sent to Slack)
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'samcart_orders' AND column_name = 'welcome_sent') THEN
+          ALTER TABLE samcart_orders ADD COLUMN welcome_sent BOOLEAN DEFAULT false;
+          -- Mark all existing orders as welcome_sent = true so they don't get processed
+          UPDATE samcart_orders SET welcome_sent = true WHERE welcome_sent IS NULL;
+        END IF;
+        -- welcome_sent_at timestamp (when welcome was sent)
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'samcart_orders' AND column_name = 'welcome_sent_at') THEN
+          ALTER TABLE samcart_orders ADD COLUMN welcome_sent_at TIMESTAMP WITH TIME ZONE;
+        END IF;
+      END $$
+    `);
 
     // Add missing typeform_applications columns for all 15 questions
     await pool.query(`

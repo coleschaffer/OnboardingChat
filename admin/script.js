@@ -230,6 +230,8 @@ function formatActivityText(activity) {
             return `💳 Payment received: <strong>${details.name || 'Unknown'}</strong> ${amount ? `- ${amount}` : ''} ${details.product ? `(${details.product})` : ''}`;
         case 'record_matched':
             return `🔗 Records matched: <strong>${details.typeform_name || 'Typeform'}</strong> → <strong>${details.onboarding_name || 'Onboarding'}</strong>`;
+        case 'delayed_welcome_sent':
+            return `⏰ Delayed welcome sent: <strong>${details.name || 'Unknown'}</strong> (${details.reason || 'OnboardingChat not completed'})`;
         default:
             return activity.action.replace(/_/g, ' ');
     }

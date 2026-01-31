@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
+const { syncOnboardingContacts } = require('./activecampaign');
+const { syncAllToCircle } = require('./circle');
 
 // Helper to send Slack welcome message as a thread
 async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
@@ -87,6 +89,12 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
         if (result.rows.length > 0) {
           samcartData = result.rows[0];
           console.log('Found matching SamCart data for:', samcartData.email || samcartData.first_name);
+
+          // Check if a delayed welcome was already sent
+          if (samcartData.welcome_sent === true) {
+            console.log('Delayed welcome already sent for this member, skipping Slack message');
+            return; // Exit early - don't send duplicate welcome
+          }
         }
       }
     } catch (err) {
@@ -358,6 +366,20 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
     }
   ], `Welcome message for ${memberName}`, threadTs, memberData);
 
+  // Mark welcome_sent = true on matching SamCart order (if exists)
+  if (samcartData?.id) {
+    try {
+      await pool.query(`
+        UPDATE samcart_orders
+        SET welcome_sent = true, welcome_sent_at = NOW()
+        WHERE id = $1
+      `, [samcartData.id]);
+      console.log('Marked SamCart order as welcome_sent');
+    } catch (err) {
+      console.error('Error updating welcome_sent:', err);
+    }
+  }
+
   console.log('Slack welcome thread sent successfully');
 }
 
@@ -574,6 +596,16 @@ router.post('/save-progress', async (req, res) => {
       // Send Slack welcome message (async, don't wait)
       sendSlackWelcome(answers, teamMembers, cLevelPartners, pool).catch(err => {
         console.error('Failed to send Slack welcome:', err);
+      });
+
+      // Sync team members and partners to ActiveCampaign (async, don't wait)
+      syncOnboardingContacts(teamMembers, cLevelPartners, pool).catch(err => {
+        console.error('Failed to sync contacts to ActiveCampaign:', err);
+      });
+
+      // Sync team members and partners to Circle communities (async, don't wait)
+      syncAllToCircle(teamMembers, cLevelPartners, pool).catch(err => {
+        console.error('Failed to sync contacts to Circle:', err);
       });
     }
 

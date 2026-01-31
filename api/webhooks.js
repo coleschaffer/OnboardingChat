@@ -309,12 +309,12 @@ router.post('/samcart', async (req, res) => {
       }
     }
 
-    // Insert new order
+    // Insert new order with welcome_sent = false (will be set to true after welcome is sent)
     const result = await pool.query(`
       INSERT INTO samcart_orders (
         samcart_order_id, event_type, email, first_name, last_name, phone,
-        product_name, product_id, order_total, currency, status, raw_data
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        product_name, product_id, order_total, currency, status, raw_data, welcome_sent
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       RETURNING id
     `, [
       orderData.samcart_order_id,
@@ -328,7 +328,8 @@ router.post('/samcart', async (req, res) => {
       orderData.order_total,
       orderData.currency,
       orderData.status,
-      JSON.stringify(payload)
+      JSON.stringify(payload),
+      false  // welcome_sent starts as false
     ]);
 
     // Try to link to Typeform application by email
