@@ -1,8 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
-const { syncOnboardingContacts } = require('./activecampaign');
-const { syncAllToCircle } = require('./circle');
+const { syncTeamMembers, syncPartners } = require('./activecampaign');
+const { syncTeamMembersToCircle, syncPartnersToCircle } = require('./circle');
 
 // Helper to send Slack welcome message as a thread
 async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
@@ -541,19 +541,24 @@ router.post('/save-progress', async (req, res) => {
     const session = sessionId || uuidv4();
     const progress = Math.round((currentQuestion / totalQuestions) * 100);
 
-    // Check if session exists
+    // Get the last answered question ID to determine if we need to sync
+    const lastQuestionId = answers.lastQuestionId || null;
+
+    // Check if session exists and get previous data
     const existing = await pool.query(
-      'SELECT id, business_owner_id FROM onboarding_submissions WHERE session_id = $1',
+      'SELECT id, business_owner_id, data FROM onboarding_submissions WHERE session_id = $1',
       [session]
     );
 
     let submissionId;
     let businessOwnerId = null;
+    let previousData = null;
 
     if (existing.rows.length > 0) {
       // Update existing submission
       submissionId = existing.rows[0].id;
       businessOwnerId = existing.rows[0].business_owner_id;
+      previousData = existing.rows[0].data;
 
       await pool.query(`
         UPDATE onboarding_submissions SET
@@ -566,7 +571,7 @@ router.post('/save-progress', async (req, res) => {
       `, [
         JSON.stringify({ answers, teamMembers, cLevelPartners }),
         progress,
-        answers.lastQuestionId || null,
+        lastQuestionId,
         isComplete || false,
         isComplete ? new Date() : null,
         session
@@ -582,11 +587,54 @@ router.post('/save-progress', async (req, res) => {
         session,
         JSON.stringify({ answers, teamMembers, cLevelPartners }),
         progress,
-        answers.lastQuestionId || null,
+        lastQuestionId,
         isComplete || false,
         isComplete ? new Date() : null
       ]);
       submissionId = result.rows[0].id;
+    }
+
+    // Sync Team Members to Circle/ActiveCampaign when they're submitted
+    // Trigger when we have team members and they're newly added (not synced before)
+    if (teamMembers && teamMembers.length > 0) {
+      const previousTeamMembers = previousData?.teamMembers || [];
+      const previousEmails = new Set(previousTeamMembers.map(m => m.email?.toLowerCase()).filter(Boolean));
+      const newTeamMembers = teamMembers.filter(m => m.email && !previousEmails.has(m.email.toLowerCase()));
+
+      if (newTeamMembers.length > 0) {
+        console.log(`[Onboarding] Syncing ${newTeamMembers.length} new team member(s) to Circle/ActiveCampaign`);
+
+        // Sync to Circle (async, don't wait)
+        syncTeamMembersToCircle(newTeamMembers, pool).catch(err => {
+          console.error('Failed to sync team members to Circle:', err);
+        });
+
+        // Sync to ActiveCampaign (async, don't wait)
+        syncTeamMembers(newTeamMembers, pool).catch(err => {
+          console.error('Failed to sync team members to ActiveCampaign:', err);
+        });
+      }
+    }
+
+    // Sync Partners to Circle/ActiveCampaign when they're submitted
+    if (cLevelPartners && cLevelPartners.length > 0) {
+      const previousPartners = previousData?.cLevelPartners || [];
+      const previousEmails = new Set(previousPartners.map(p => p.email?.toLowerCase()).filter(Boolean));
+      const newPartners = cLevelPartners.filter(p => p.email && !previousEmails.has(p.email.toLowerCase()));
+
+      if (newPartners.length > 0) {
+        console.log(`[Onboarding] Syncing ${newPartners.length} new partner(s) to Circle/ActiveCampaign`);
+
+        // Sync to Circle (async, don't wait)
+        syncPartnersToCircle(newPartners, pool).catch(err => {
+          console.error('Failed to sync partners to Circle:', err);
+        });
+
+        // Sync to ActiveCampaign (async, don't wait)
+        syncPartners(newPartners, pool).catch(err => {
+          console.error('Failed to sync partners to ActiveCampaign:', err);
+        });
+      }
     }
 
     // If complete, create/update business owner and team members
@@ -598,15 +646,8 @@ router.post('/save-progress', async (req, res) => {
         console.error('Failed to send Slack welcome:', err);
       });
 
-      // Sync team members and partners to ActiveCampaign (async, don't wait)
-      syncOnboardingContacts(teamMembers, cLevelPartners, pool).catch(err => {
-        console.error('Failed to sync contacts to ActiveCampaign:', err);
-      });
-
-      // Sync team members and partners to Circle communities (async, don't wait)
-      syncAllToCircle(teamMembers, cLevelPartners, pool).catch(err => {
-        console.error('Failed to sync contacts to Circle:', err);
-      });
+      // Note: Circle/ActiveCampaign sync now happens when questions are answered,
+      // not at completion. The APIs handle duplicates gracefully.
     }
 
     res.json({

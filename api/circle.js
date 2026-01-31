@@ -54,14 +54,18 @@ function getCircleToken(community) {
 
 /**
  * Add a member to a Circle community with specific access group
+ * This is a two-step process:
+ * 1. Create/invite the member to the community
+ * 2. Add them to the specific access group
+ *
  * @param {Object} options
  * @param {string} options.community - 'CA' or 'SPG'
  * @param {string} options.email - Member's email address
  * @param {string} options.name - Member's name
- * @param {number} options.spaceGroupId - The access/space group ID to add the member to
+ * @param {number} options.accessGroupId - The access group ID to add the member to
  * @returns {Promise<Object>} Result object with success status and details
  */
-async function addMemberToCircle({ community, email, name, spaceGroupId }) {
+async function addMemberToCircle({ community, email, name, accessGroupId }) {
   const config = CIRCLE_CONFIG[community];
   if (!config) {
     return { success: false, error: `Unknown Circle community: ${community}` };
@@ -78,58 +82,96 @@ async function addMemberToCircle({ community, email, name, spaceGroupId }) {
   const lastName = nameParts.slice(1).join(' ') || '';
 
   try {
-    const response = await fetch(`${config.baseUrl}/community_members`, {
+    // Step 1: Create/invite the member to the community
+    const createResponse = await fetch(`${config.baseUrl}/community_members`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Token ${token}`
       },
       body: JSON.stringify({
-        community_id: config.communityId,
         email: email,
-        name: name,
-        first_name: firstName,
-        last_name: lastName,
-        space_group_ids: [spaceGroupId],
+        name: name || `${firstName} ${lastName}`.trim(),
         skip_invitation: false  // Send invitation email
       })
     });
 
-    const data = await response.json();
+    const createData = await createResponse.json();
+    let memberCreated = false;
+    let memberAlreadyExists = false;
 
-    if (response.ok) {
-      console.log(`[Circle] Successfully added ${email} to ${community} community (space group ${spaceGroupId})`);
+    if (createResponse.ok) {
+      console.log(`[Circle] Successfully invited ${email} to ${community} community`);
+      memberCreated = true;
+    } else {
+      // Check if member already exists - this is fine, we still need to add to access group
+      const errorMessage = createData.message || createData.error || JSON.stringify(createData);
+      if (errorMessage.toLowerCase().includes('already') ||
+          errorMessage.toLowerCase().includes('exists') ||
+          errorMessage.toLowerCase().includes('duplicate') ||
+          errorMessage.toLowerCase().includes('member')) {
+        console.log(`[Circle] Member ${email} already exists in ${community} - will add to access group`);
+        memberAlreadyExists = true;
+      } else {
+        console.error(`[Circle] Failed to create member ${email} in ${community}: ${errorMessage}`);
+        return {
+          success: false,
+          community,
+          email,
+          accessGroupId,
+          error: errorMessage
+        };
+      }
+    }
+
+    // Step 2: Add member to the access group
+    const accessGroupResponse = await fetch(`${config.baseUrl}/access_groups/${accessGroupId}/community_members`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Token ${token}`
+      },
+      body: JSON.stringify({
+        email: email
+      })
+    });
+
+    const accessGroupData = await accessGroupResponse.json();
+
+    if (accessGroupResponse.ok) {
+      console.log(`[Circle] Successfully added ${email} to access group ${accessGroupId} in ${community}`);
       return {
         success: true,
         community,
         email,
-        spaceGroupId,
-        message: data.message || 'Member added successfully'
+        accessGroupId,
+        message: accessGroupData.message || 'Member added to access group',
+        memberCreated,
+        memberAlreadyExists
       };
     } else {
-      // Check if it's a duplicate (member already exists) - this is not an error
-      const errorMessage = data.message || data.error || JSON.stringify(data);
+      // Check if already in access group
+      const errorMessage = accessGroupData.message || accessGroupData.error || JSON.stringify(accessGroupData);
       if (errorMessage.toLowerCase().includes('already') ||
-          errorMessage.toLowerCase().includes('exists') ||
-          errorMessage.toLowerCase().includes('duplicate')) {
-        console.log(`[Circle] Member ${email} already exists in ${community} - continuing`);
+          errorMessage.toLowerCase().includes('exists')) {
+        console.log(`[Circle] Member ${email} already in access group ${accessGroupId} in ${community}`);
         return {
           success: true,
           community,
           email,
-          spaceGroupId,
-          message: 'Member already exists',
-          alreadyExists: true
+          accessGroupId,
+          message: 'Member already in access group',
+          alreadyInGroup: true
         };
       }
 
-      console.error(`[Circle] Failed to add ${email} to ${community}: ${errorMessage}`);
+      console.error(`[Circle] Failed to add ${email} to access group ${accessGroupId} in ${community}: ${errorMessage}`);
       return {
         success: false,
         community,
         email,
-        spaceGroupId,
-        error: errorMessage
+        accessGroupId,
+        error: `Member invited but failed to add to access group: ${errorMessage}`
       };
     }
   } catch (error) {
@@ -138,7 +180,7 @@ async function addMemberToCircle({ community, email, name, spaceGroupId }) {
       success: false,
       community,
       email,
-      spaceGroupId,
+      accessGroupId,
       error: error.message
     };
   }
@@ -177,7 +219,7 @@ async function syncTeamMembersToCircle(teamMembers, pool = null) {
       community: 'CA',
       email: member.email,
       name: member.name || `${member.firstName || ''} ${member.lastName || ''}`.trim(),
-      spaceGroupId: CIRCLE_CONFIG.CA.accessGroups.teamMembers
+      accessGroupId: CIRCLE_CONFIG.CA.accessGroups.teamMembers
     });
 
     if (caResult.success) {
@@ -195,7 +237,7 @@ async function syncTeamMembersToCircle(teamMembers, pool = null) {
       community: 'SPG',
       email: member.email,
       name: member.name || `${member.firstName || ''} ${member.lastName || ''}`.trim(),
-      spaceGroupId: CIRCLE_CONFIG.SPG.accessGroups.teamMembers
+      accessGroupId: CIRCLE_CONFIG.SPG.accessGroups.teamMembers
     });
 
     if (spgResult.success) {
@@ -267,7 +309,7 @@ async function syncPartnersToCircle(partners, pool = null) {
       community: 'CA',
       email: partner.email,
       name: partner.name || `${partner.firstName || ''} ${partner.lastName || ''}`.trim(),
-      spaceGroupId: CIRCLE_CONFIG.CA.accessGroups.partners
+      accessGroupId: CIRCLE_CONFIG.CA.accessGroups.partners
     });
 
     if (caResult.success) {
@@ -285,7 +327,7 @@ async function syncPartnersToCircle(partners, pool = null) {
       community: 'SPG',
       email: partner.email,
       name: partner.name || `${partner.firstName || ''} ${partner.lastName || ''}`.trim(),
-      spaceGroupId: CIRCLE_CONFIG.SPG.accessGroups.partners
+      accessGroupId: CIRCLE_CONFIG.SPG.accessGroups.partners
     });
 
     if (spgResult.success) {
