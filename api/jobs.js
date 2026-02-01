@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const { syncOnboardingToMonday } = require('./monday');
 
 // Helper to convert revenue to generalized format
 function generalizeRevenue(revenue) {
@@ -516,6 +517,118 @@ router.post('/process-delayed-welcomes', async (req, res) => {
   } catch (error) {
     console.error('Error processing delayed welcomes:', error);
     res.status(500).json({ error: 'Failed to process delayed welcomes' });
+  }
+});
+
+// Process pending Monday.com syncs - called by Railway cron job
+router.post('/process-monday-syncs', async (req, res) => {
+  try {
+    // Verify secret key
+    const secretKey = req.headers['x-cron-secret'] || req.body.secret;
+    const expectedSecret = process.env.CRON_SECRET;
+
+    if (!expectedSecret) {
+      console.error('CRON_SECRET not configured');
+      return res.status(500).json({ error: 'Server not configured for cron jobs' });
+    }
+
+    if (secretKey !== expectedSecret) {
+      console.error('Invalid cron secret provided');
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const pool = req.app.locals.pool;
+    console.log('Processing pending Monday.com syncs...');
+
+    // Find completed onboarding submissions that need Monday sync
+    // monday_sync_scheduled_at is in the past and monday_synced is false
+    const pendingSyncs = await pool.query(`
+      SELECT os.*, bo.email as business_owner_email
+      FROM onboarding_submissions os
+      LEFT JOIN business_owners bo ON os.business_owner_id = bo.id
+      WHERE os.monday_sync_scheduled_at IS NOT NULL
+        AND os.monday_sync_scheduled_at <= NOW()
+        AND os.monday_synced = false
+        AND os.is_complete = true
+      ORDER BY os.monday_sync_scheduled_at ASC
+      LIMIT 10
+    `);
+
+    console.log(`Found ${pendingSyncs.rows.length} pending Monday syncs to process`);
+
+    const results = {
+      processed: 0,
+      synced: 0,
+      skipped: 0,
+      errors: []
+    };
+
+    for (const submission of pendingSyncs.rows) {
+      try {
+        const data = submission.data || {};
+        const teamMembers = data.teamMembers || [];
+        const partners = data.cLevelPartners || data.partners || [];
+        const businessOwnerEmail = submission.business_owner_email || data.answers?.email;
+
+        if (!businessOwnerEmail) {
+          console.log(`[Monday] Skipping submission ${submission.id} - no business owner email`);
+          results.skipped++;
+
+          // Mark as synced to prevent retry (can't sync without email)
+          await pool.query(`
+            UPDATE onboarding_submissions
+            SET monday_synced = true, monday_synced_at = NOW()
+            WHERE id = $1
+          `, [submission.id]);
+          continue;
+        }
+
+        if (teamMembers.length === 0 && partners.length === 0) {
+          console.log(`[Monday] Skipping submission ${submission.id} - no team members or partners`);
+          results.skipped++;
+
+          // Mark as synced (nothing to sync)
+          await pool.query(`
+            UPDATE onboarding_submissions
+            SET monday_synced = true, monday_synced_at = NOW()
+            WHERE id = $1
+          `, [submission.id]);
+          continue;
+        }
+
+        console.log(`[Monday] Processing sync for ${businessOwnerEmail} (${teamMembers.length} team members, ${partners.length} partners)`);
+
+        // Sync to Monday.com
+        const syncResult = await syncOnboardingToMonday(data, businessOwnerEmail, pool);
+
+        // Mark as synced
+        await pool.query(`
+          UPDATE onboarding_submissions
+          SET monday_synced = true, monday_synced_at = NOW()
+          WHERE id = $1
+        `, [submission.id]);
+
+        results.synced++;
+        results.processed++;
+
+        console.log(`[Monday] Sync complete for ${businessOwnerEmail}: ${syncResult.totalSynced} synced, ${syncResult.totalErrors} errors`);
+      } catch (error) {
+        console.error(`[Monday] Error processing submission ${submission.id}:`, error);
+        results.errors.push({
+          submission_id: submission.id,
+          error: error.message
+        });
+      }
+    }
+
+    console.log('Monday sync processing complete:', results);
+    res.json({
+      success: true,
+      ...results
+    });
+  } catch (error) {
+    console.error('Error processing Monday syncs:', error);
+    res.status(500).json({ error: 'Failed to process Monday syncs' });
   }
 });
 

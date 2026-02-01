@@ -646,6 +646,15 @@ router.post('/save-progress', async (req, res) => {
         console.error('Failed to send Slack welcome:', err);
       });
 
+      // Schedule Monday.com sync for 10 minutes from now
+      // This gives time for native Monday automations to add the Business Owner first
+      await pool.query(`
+        UPDATE onboarding_submissions
+        SET monday_sync_scheduled_at = NOW() + INTERVAL '10 minutes'
+        WHERE session_id = $1
+      `, [session]);
+      console.log(`[Onboarding] Scheduled Monday sync for 10 minutes from now (session: ${session})`);
+
       // Note: Circle/ActiveCampaign sync now happens when questions are answered,
       // not at completion. The APIs handle duplicates gracefully.
     }

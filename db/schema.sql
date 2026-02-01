@@ -100,6 +100,9 @@ CREATE TABLE IF NOT EXISTS onboarding_submissions (
     last_question VARCHAR(100),
     is_complete BOOLEAN DEFAULT FALSE,
     completed_at TIMESTAMP WITH TIME ZONE,
+    monday_sync_scheduled_at TIMESTAMP WITH TIME ZONE,
+    monday_synced BOOLEAN DEFAULT FALSE,
+    monday_synced_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -145,6 +148,10 @@ CREATE INDEX IF NOT EXISTS idx_onboarding_submissions_complete ON onboarding_sub
 CREATE INDEX IF NOT EXISTS idx_activity_log_created ON activity_log(created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_business_owners_progress ON business_owners(onboarding_progress);
+
+CREATE INDEX IF NOT EXISTS idx_onboarding_submissions_monday_sync
+ON onboarding_submissions(monday_sync_scheduled_at, monday_synced)
+WHERE monday_synced = FALSE AND monday_sync_scheduled_at IS NOT NULL;
 
 -- Function to update updated_at timestamp
 CREATE OR REPLACE FUNCTION update_updated_at_column()
