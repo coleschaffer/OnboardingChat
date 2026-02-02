@@ -614,7 +614,22 @@ router.post('/process-monday-syncs', async (req, res) => {
           continue;
         }
 
-        // Mark as synced
+        // Check if there were errors - if all items failed, don't mark as synced
+        const totalToSync = teamMembers.length + partners.length;
+        const totalSynced = syncResult.totalSynced || 0;
+        const totalErrors = syncResult.totalErrors || 0;
+
+        if (totalToSync > 0 && totalSynced === 0 && totalErrors > 0) {
+          console.log(`[Monday] All items failed to sync (${totalErrors} errors) - will retry on next cron run`);
+          results.errors.push({
+            submission_id: submission.id,
+            error: `All ${totalErrors} items failed to sync`
+          });
+          results.processed++;
+          continue;
+        }
+
+        // Mark as synced (either succeeded or nothing to sync)
         await pool.query(`
           UPDATE onboarding_submissions
           SET monday_synced = true, monday_synced_at = NOW()
