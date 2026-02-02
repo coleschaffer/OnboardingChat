@@ -542,12 +542,14 @@ router.post('/process-monday-syncs', async (req, res) => {
 
     // Find completed onboarding submissions that need Monday sync
     // monday_sync_scheduled_at is in the past and monday_synced is false
+    // Only try syncs scheduled within the last 2 hours (prevent infinite retries)
     const pendingSyncs = await pool.query(`
       SELECT os.*, bo.email as business_owner_email
       FROM onboarding_submissions os
       LEFT JOIN business_owners bo ON os.business_owner_id = bo.id
       WHERE os.monday_sync_scheduled_at IS NOT NULL
         AND os.monday_sync_scheduled_at <= NOW()
+        AND os.monday_sync_scheduled_at >= NOW() - INTERVAL '2 hours'
         AND os.monday_synced = false
         AND os.is_complete = true
       ORDER BY os.monday_sync_scheduled_at ASC
@@ -600,6 +602,16 @@ router.post('/process-monday-syncs', async (req, res) => {
 
         // Sync to Monday.com
         const syncResult = await syncOnboardingToMonday(data, businessOwnerEmail, pool);
+
+        // Check if Business Owner wasn't found for partners - if so, DON'T mark as synced to allow retry
+        const partnerBONotFound = syncResult.partners?.businessOwnerNotFound;
+
+        if (partnerBONotFound && partners.length > 0) {
+          console.log(`[Monday] Business Owner not in Monday yet - will retry partner sync on next cron run`);
+          // Don't mark as synced - will retry on next cron
+          results.processed++;
+          continue;
+        }
 
         // Mark as synced
         await pool.query(`

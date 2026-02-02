@@ -164,6 +164,44 @@ async function findBusinessOwnerByEmail(email) {
 }
 
 /**
+ * Check if a team member already exists in PRO Team Members board by email
+ * @param {string} email - Email to search for
+ * @returns {Promise<boolean>} True if exists
+ */
+async function teamMemberExistsInMonday(email) {
+  if (!email) return false;
+
+  const columns = await getColumnIds(BOARDS.PRO_TEAM_MEMBERS);
+  const emailCol = columns['Email'];
+
+  if (!emailCol) return false;
+
+  const query = `
+    query ($boardId: ID!, $columnId: String!, $value: String!) {
+      items_page_by_column_values(
+        board_id: $boardId,
+        columns: [{ column_id: $columnId, column_values: [$value] }],
+        limit: 1
+      ) {
+        items { id }
+      }
+    }
+  `;
+
+  try {
+    const data = await mondayRequest(query, {
+      boardId: BOARDS.PRO_TEAM_MEMBERS,
+      columnId: emailCol.id,
+      value: email.toLowerCase()
+    });
+    return (data.items_page_by_column_values?.items || []).length > 0;
+  } catch (error) {
+    console.error(`[Monday] Error checking team member existence:`, error.message);
+    return false;
+  }
+}
+
+/**
  * Create an item on the PRO Team Members board
  * @param {Object} teamMember - Team member data
  * @param {string} businessOwnerId - Monday.com item ID of the Business Owner
@@ -417,6 +455,12 @@ async function syncTeamMembersToMonday(teamMembers, businessOwnerEmail, pool = n
 
   for (const member of teamMembers) {
     try {
+      // Check if team member already exists in Monday
+      if (member.email && await teamMemberExistsInMonday(member.email)) {
+        console.log(`[Monday] Team member ${member.email} already exists, skipping`);
+        continue;
+      }
+
       await createTeamMemberItem(member, businessOwnerId);
       results.synced++;
     } catch (error) {
@@ -497,7 +541,8 @@ async function syncPartnersToMonday(partners, businessOwnerEmail, pool = null) {
     console.error(`[Monday] Cannot sync partners: Business Owner not found with email ${businessOwnerEmail}`);
     return {
       synced: 0,
-      errors: [{ error: `Business Owner not found: ${businessOwnerEmail}` }]
+      errors: [{ error: `Business Owner not found: ${businessOwnerEmail}` }],
+      businessOwnerNotFound: true  // Flag to indicate retry needed
     };
   }
 
