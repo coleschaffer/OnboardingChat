@@ -603,6 +603,13 @@ router.post('/process-monday-syncs', async (req, res) => {
         // Sync to Monday.com
         const syncResult = await syncOnboardingToMonday(data, businessOwnerEmail, pool);
 
+        // Check if Monday is not configured - if so, DON'T mark as synced to allow retry when configured
+        if (syncResult.notConfigured) {
+          console.log(`[Monday] Monday.com API not configured - will retry sync on next cron run when configured`);
+          results.processed++;
+          continue;
+        }
+
         // Check if Business Owner wasn't found - if so, DON'T mark as synced to allow retry
         const teamMembersBONotFound = syncResult.teamMembers?.businessOwnerNotFound;
         const partnersBONotFound = syncResult.partners?.businessOwnerNotFound;

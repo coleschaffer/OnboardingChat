@@ -434,7 +434,7 @@ async function updateSubitemColumns(boardId, itemId, partner) {
 async function syncTeamMembersToMonday(teamMembers, businessOwnerEmail, pool = null) {
   if (!isConfigured()) {
     console.log('[Monday] Not configured, skipping team member sync');
-    return { synced: 0, errors: [] };
+    return { synced: 0, errors: [], notConfigured: true };
   }
 
   if (!teamMembers || teamMembers.length === 0) {
@@ -528,7 +528,7 @@ async function syncTeamMembersToMonday(teamMembers, businessOwnerEmail, pool = n
 async function syncPartnersToMonday(partners, businessOwnerEmail, pool = null) {
   if (!isConfigured()) {
     console.log('[Monday] Not configured, skipping partner sync');
-    return { synced: 0, errors: [] };
+    return { synced: 0, errors: [], notConfigured: true };
   }
 
   if (!partners || partners.length === 0) {
@@ -617,7 +617,11 @@ async function syncPartnersToMonday(partners, businessOwnerEmail, pool = null) {
 async function syncOnboardingToMonday(onboardingData, businessOwnerEmail, pool = null) {
   if (!isConfigured()) {
     console.log('[Monday] Not configured, skipping sync');
-    return { teamMembers: { synced: 0, errors: [] }, partners: { synced: 0, errors: [] } };
+    return {
+      teamMembers: { synced: 0, errors: [], notConfigured: true },
+      partners: { synced: 0, errors: [], notConfigured: true },
+      notConfigured: true
+    };
   }
 
   console.log(`[Monday] Starting sync for Business Owner: ${businessOwnerEmail}`);
