@@ -323,36 +323,19 @@ async function createPartnerSubitem(partner, businessOwnerId) {
 
 /**
  * Update subitem columns after creation
+ * Known subitem column IDs for PRO Business Owners subitems:
+ * - Email: "email__1"
+ * - Role: "text__1"
  */
 async function updateSubitemColumns(boardId, itemId, partner) {
-  // Get the subitem board columns
-  const columns = await getColumnIds(boardId);
+  // Use known column IDs for subitems
+  const EMAIL_COL_ID = 'email__1';
+  const ROLE_COL_ID = 'text__1';
 
-  console.log(`[Monday] Subitem board ${boardId} columns:`, Object.keys(columns).join(', '));
-
-  // Find email column (case-insensitive search)
-  let emailCol = null;
-  for (const [title, col] of Object.entries(columns)) {
-    if (title.toLowerCase() === 'email') {
-      emailCol = col;
-      break;
-    }
-  }
-
-  // Find role column (try multiple common names)
-  let roleCol = null;
-  const roleNames = ['role', 'title', 'notes', 'text'];
-  for (const [title, col] of Object.entries(columns)) {
-    if (roleNames.includes(title.toLowerCase())) {
-      roleCol = col;
-      break;
-    }
-  }
-
-  // Update email if we found the column
-  if (emailCol && partner.email) {
+  // Update email
+  if (partner.email) {
     try {
-      console.log(`[Monday] Setting Email column (${emailCol.id}) to: ${partner.email}`);
+      console.log(`[Monday] Setting Email column (${EMAIL_COL_ID}) to: ${partner.email}`);
       const query = `
         mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: JSON!) {
           change_column_value(
@@ -369,48 +352,40 @@ async function updateSubitemColumns(boardId, itemId, partner) {
       await mondayRequest(query, {
         boardId: boardId,
         itemId: itemId,
-        columnId: emailCol.id,
+        columnId: EMAIL_COL_ID,
         value: JSON.stringify({ email: partner.email, text: partner.email })
       });
       console.log(`[Monday] Email updated successfully`);
     } catch (error) {
       console.error(`[Monday] Failed to update email: ${error.message}`);
     }
-  } else {
-    console.log(`[Monday] No email column found or no email provided`);
   }
 
-  // Update role if we found the column
-  if (roleCol) {
-    try {
-      console.log(`[Monday] Setting Role column (${roleCol.id}, type: ${roleCol.type}) to: Business Partners`);
-
-      // Use change_simple_column_value for text columns
-      const query = `
-        mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: String!) {
-          change_simple_column_value(
-            board_id: $boardId,
-            item_id: $itemId,
-            column_id: $columnId,
-            value: $value
-          ) {
-            id
-          }
+  // Update role to "Business Partners"
+  try {
+    console.log(`[Monday] Setting Role column (${ROLE_COL_ID}) to: Business Partners`);
+    const query = `
+      mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: String!) {
+        change_simple_column_value(
+          board_id: $boardId,
+          item_id: $itemId,
+          column_id: $columnId,
+          value: $value
+        ) {
+          id
         }
-      `;
+      }
+    `;
 
-      await mondayRequest(query, {
-        boardId: boardId,
-        itemId: itemId,
-        columnId: roleCol.id,
-        value: 'Business Partners'
-      });
-      console.log(`[Monday] Role updated successfully`);
-    } catch (error) {
-      console.error(`[Monday] Failed to update role: ${error.message}`);
-    }
-  } else {
-    console.log(`[Monday] No role column found`);
+    await mondayRequest(query, {
+      boardId: boardId,
+      itemId: itemId,
+      columnId: ROLE_COL_ID,
+      value: 'Business Partners'
+    });
+    console.log(`[Monday] Role updated successfully`);
+  } catch (error) {
+    console.error(`[Monday] Failed to update role: ${error.message}`);
   }
 }
 
