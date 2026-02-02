@@ -672,4 +672,39 @@ router.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Reset Monday sync for testing - requires cron secret
+router.post('/reset-monday-sync', async (req, res) => {
+  try {
+    const secretKey = req.headers['x-cron-secret'] || req.body.secret;
+    const expectedSecret = process.env.CRON_SECRET;
+
+    if (!expectedSecret || secretKey !== expectedSecret) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const pool = req.app.locals.pool;
+
+    const result = await pool.query(`
+      UPDATE onboarding_submissions
+      SET monday_synced = false,
+          monday_synced_at = NULL,
+          monday_sync_scheduled_at = NOW()
+      WHERE is_complete = true
+        AND monday_synced = true
+        AND created_at > NOW() - INTERVAL '24 hours'
+      RETURNING id, session_id
+    `);
+
+    console.log(`[Monday] Reset ${result.rowCount} submissions for Monday sync retry`);
+    res.json({
+      success: true,
+      reset: result.rowCount,
+      submissions: result.rows
+    });
+  } catch (error) {
+    console.error('Error resetting Monday sync:', error);
+    res.status(500).json({ error: 'Failed to reset Monday sync' });
+  }
+});
+
 module.exports = router;
