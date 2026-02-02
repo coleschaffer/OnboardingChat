@@ -603,11 +603,12 @@ router.post('/process-monday-syncs', async (req, res) => {
         // Sync to Monday.com
         const syncResult = await syncOnboardingToMonday(data, businessOwnerEmail, pool);
 
-        // Check if Business Owner wasn't found for partners - if so, DON'T mark as synced to allow retry
-        const partnerBONotFound = syncResult.partners?.businessOwnerNotFound;
+        // Check if Business Owner wasn't found - if so, DON'T mark as synced to allow retry
+        const teamMembersBONotFound = syncResult.teamMembers?.businessOwnerNotFound;
+        const partnersBONotFound = syncResult.partners?.businessOwnerNotFound;
 
-        if (partnerBONotFound && partners.length > 0) {
-          console.log(`[Monday] Business Owner not in Monday yet - will retry partner sync on next cron run`);
+        if ((teamMembersBONotFound && teamMembers.length > 0) || (partnersBONotFound && partners.length > 0)) {
+          console.log(`[Monday] Business Owner not in Monday yet - will retry sync on next cron run`);
           // Don't mark as synced - will retry on next cron
           results.processed++;
           continue;

@@ -445,12 +445,17 @@ async function syncTeamMembersToMonday(teamMembers, businessOwnerEmail, pool = n
 
   const results = { synced: 0, errors: [] };
 
-  // Find the Business Owner first
+  // Find the Business Owner first - required to link team members
   const businessOwner = await findBusinessOwnerByEmail(businessOwnerEmail);
   const businessOwnerId = businessOwner?.id;
 
   if (!businessOwnerId) {
-    console.log(`[Monday] Warning: Business Owner not found, team members will be created without link`);
+    console.error(`[Monday] Cannot sync team members: Business Owner not found with email ${businessOwnerEmail}`);
+    return {
+      synced: 0,
+      errors: [{ error: `Business Owner not found: ${businessOwnerEmail}` }],
+      businessOwnerNotFound: true  // Flag to indicate retry needed
+    };
   }
 
   for (const member of teamMembers) {
