@@ -143,9 +143,9 @@ async function loadOverview() {
         document.getElementById('stat-applications').textContent = stats.totals.recent_applications;
         document.getElementById('stat-team').textContent = stats.totals.team_members;
 
-        // Update badge
+        // Update badge - only count truly new applications (without matching onboarding)
         const badge = document.getElementById('new-applications-badge');
-        const newCount = stats.application_status?.new || 0;
+        const newCount = stats.truly_new_applications || 0;
         badge.textContent = newCount;
         badge.style.display = newCount > 0 ? 'inline' : 'none';
 
@@ -308,12 +308,17 @@ async function loadApplications() {
         if (data.applications.length === 0) {
             tbody.innerHTML = '<tr><td colspan="6" class="loading">No applications found</td></tr>';
         } else {
-            tbody.innerHTML = data.applications.map(app => `
+            tbody.innerHTML = data.applications.map(app => {
+                // If has matching onboarding, show "Complete" instead of original status
+                const displayStatus = app.has_onboarding ? 'completed' : app.status;
+                const displayStatusText = app.has_onboarding ? 'Complete' : app.status;
+
+                return `
                 <tr>
                     <td><strong>${app.first_name || ''} ${app.last_name || ''}</strong></td>
                     <td>${app.email || '-'}</td>
                     <td>${app.annual_revenue || '-'}</td>
-                    <td><span class="status-badge ${app.status}">${app.status}</span></td>
+                    <td><span class="status-badge ${displayStatus}">${displayStatusText}</span></td>
                     <td>${formatDate(app.created_at)}</td>
                     <td>
                         <div class="kebab-menu">
@@ -343,7 +348,7 @@ async function loadApplications() {
                         </div>
                     </td>
                 </tr>
-            `).join('');
+            `}).join('');
         }
 
         renderPagination('applications', data.total, applicationsPage);

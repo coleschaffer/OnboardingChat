@@ -7,27 +7,37 @@ router.get('/', async (req, res) => {
     const pool = req.app.locals.pool;
     const { status, search, limit = 50, offset = 0 } = req.query;
 
-    let query = 'SELECT * FROM typeform_applications WHERE 1=1';
+    // Query applications with a flag indicating if there's a matching onboarding submission
+    let query = `
+      SELECT ta.*,
+        CASE WHEN EXISTS (
+          SELECT 1 FROM onboarding_submissions os
+          JOIN business_owners bo ON os.business_owner_id = bo.id
+          WHERE LOWER(bo.email) = LOWER(ta.email)
+        ) THEN true ELSE false END as has_onboarding
+      FROM typeform_applications ta
+      WHERE 1=1
+    `;
     const params = [];
     let paramIndex = 1;
 
     if (status) {
-      query += ` AND status = $${paramIndex++}`;
+      query += ` AND ta.status = $${paramIndex++}`;
       params.push(status);
     }
 
     if (search) {
       query += ` AND (
-        first_name ILIKE $${paramIndex} OR
-        last_name ILIKE $${paramIndex} OR
-        email ILIKE $${paramIndex} OR
-        business_description ILIKE $${paramIndex}
+        ta.first_name ILIKE $${paramIndex} OR
+        ta.last_name ILIKE $${paramIndex} OR
+        ta.email ILIKE $${paramIndex} OR
+        ta.business_description ILIKE $${paramIndex}
       )`;
       params.push(`%${search}%`);
       paramIndex++;
     }
 
-    query += ` ORDER BY created_at DESC LIMIT $${paramIndex++} OFFSET $${paramIndex++}`;
+    query += ` ORDER BY ta.created_at DESC LIMIT $${paramIndex++} OFFSET $${paramIndex++}`;
     params.push(parseInt(limit), parseInt(offset));
 
     const result = await pool.query(query, params);
@@ -55,6 +65,18 @@ router.get('/', async (req, res) => {
       GROUP BY status
     `);
 
+    // Get count of truly new applications (new status AND no matching onboarding)
+    const trulyNewCount = await pool.query(`
+      SELECT COUNT(*) as count
+      FROM typeform_applications ta
+      WHERE ta.status = 'new'
+        AND NOT EXISTS (
+          SELECT 1 FROM onboarding_submissions os
+          JOIN business_owners bo ON os.business_owner_id = bo.id
+          WHERE LOWER(bo.email) = LOWER(ta.email)
+        )
+    `);
+
     res.json({
       applications: result.rows,
       total: parseInt(countResult.rows[0].count),
@@ -62,6 +84,7 @@ router.get('/', async (req, res) => {
         acc[row.status] = parseInt(row.count);
         return acc;
       }, {}),
+      truly_new_count: parseInt(trulyNewCount.rows[0].count),
       limit: parseInt(limit),
       offset: parseInt(offset)
     });

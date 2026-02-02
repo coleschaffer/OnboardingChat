@@ -35,6 +35,18 @@ router.get('/', async (req, res) => {
       GROUP BY status
     `);
 
+    // Get count of truly new applications (new status AND no matching onboarding)
+    const trulyNewApplications = await pool.query(`
+      SELECT COUNT(*) as count
+      FROM typeform_applications ta
+      WHERE ta.status = 'new'
+        AND NOT EXISTS (
+          SELECT 1 FROM onboarding_submissions os
+          JOIN business_owners bo ON os.business_owner_id = bo.id
+          WHERE LOWER(bo.email) = LOWER(ta.email)
+        )
+    `);
+
     // Get source breakdown
     const sourceBreakdown = await pool.query(`
       SELECT source, COUNT(*) as count
@@ -86,6 +98,7 @@ router.get('/', async (req, res) => {
         acc[row.status] = parseInt(row.count);
         return acc;
       }, {}),
+      truly_new_applications: parseInt(trulyNewApplications.rows[0].count),
       source_breakdown: sourceBreakdown.rows.reduce((acc, row) => {
         acc[row.source] = parseInt(row.count);
         return acc;
