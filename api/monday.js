@@ -572,6 +572,51 @@ async function syncPartnersToMonday(partners, businessOwnerEmail, pool = null) {
 }
 
 /**
+ * Update Business Owner's Company field in Monday.com
+ * @param {string} businessOwnerId - Monday.com item ID
+ * @param {string} companyName - Company name to set
+ * @returns {Promise<boolean>} Success
+ */
+async function updateBusinessOwnerCompany(businessOwnerId, companyName) {
+  if (!companyName) {
+    console.log('[Monday] No company name provided, skipping Company update');
+    return false;
+  }
+
+  const COMPANY_COL_ID = 'text0';
+
+  try {
+    console.log(`[Monday] Setting Company field (${COMPANY_COL_ID}) to: ${companyName}`);
+
+    const query = `
+      mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: String!) {
+        change_simple_column_value(
+          board_id: $boardId,
+          item_id: $itemId,
+          column_id: $columnId,
+          value: $value
+        ) {
+          id
+        }
+      }
+    `;
+
+    await mondayRequest(query, {
+      boardId: BOARDS.PRO_BUSINESS_OWNERS,
+      itemId: businessOwnerId,
+      columnId: COMPANY_COL_ID,
+      value: companyName
+    });
+
+    console.log('[Monday] Company field updated successfully');
+    return true;
+  } catch (error) {
+    console.error(`[Monday] Failed to update Company field: ${error.message}`);
+    return false;
+  }
+}
+
+/**
  * Sync all (team members and partners) to Monday.com
  * This is called 10 minutes after OnboardingChat completion
  * @param {Object} onboardingData - Full onboarding data including team members and partners
@@ -591,6 +636,21 @@ async function syncOnboardingToMonday(onboardingData, businessOwnerEmail, pool =
 
   console.log(`[Monday] Starting sync for Business Owner: ${businessOwnerEmail}`);
 
+  // First, find the Business Owner and update their Company field
+  const businessOwner = await findBusinessOwnerByEmail(businessOwnerEmail);
+  let companyUpdated = false;
+
+  if (businessOwner) {
+    // Get company name from onboarding data
+    const companyName = onboardingData.answers?.businessName ||
+                        onboardingData.businessName ||
+                        onboardingData.answers?.companyName;
+
+    if (companyName) {
+      companyUpdated = await updateBusinessOwnerCompany(businessOwner.id, companyName);
+    }
+  }
+
   const teamMembers = onboardingData.teamMembers || [];
   const partners = onboardingData.cLevelPartners || onboardingData.partners || [];
 
@@ -602,11 +662,12 @@ async function syncOnboardingToMonday(onboardingData, businessOwnerEmail, pool =
   const combined = {
     teamMembers: teamResults,
     partners: partnerResults,
+    companyUpdated: companyUpdated,
     totalSynced: teamResults.synced + partnerResults.synced,
     totalErrors: teamResults.errors.length + partnerResults.errors.length
   };
 
-  console.log(`[Monday] Sync complete - ${combined.totalSynced} synced, ${combined.totalErrors} errors`);
+  console.log(`[Monday] Sync complete - ${combined.totalSynced} synced, ${combined.totalErrors} errors, company updated: ${companyUpdated}`);
   return combined;
 }
 
