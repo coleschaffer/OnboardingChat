@@ -144,8 +144,12 @@ router.post('/typeform', express.raw({ type: 'application/json' }), async (req, 
     );
 
     if (existing.rows.length > 0) {
+      console.log(`[Typeform] Duplicate response detected: ${responseId} already exists as ${existing.rows[0].id}`);
       return res.status(200).json({ message: 'Response already processed' });
     }
+
+    console.log(`[Typeform] New response: ${responseId} for ${fieldMapping.email}`);
+
 
     // Insert new application with all 15 fields
     const result = await pool.query(`
@@ -387,8 +391,11 @@ async function sendAutomatedEmailAndSlackThread(pool, applicationId, fieldMappin
   const recipientEmail = fieldMapping.email;
   const firstName = fieldMapping.first_name || 'there';
 
+  console.log(`[AutoEmail] Starting automated email/Slack flow for application ${applicationId}`);
+  console.log(`[AutoEmail] Recipient: ${recipientEmail}, First Name: ${firstName}`);
+
   if (!recipientEmail) {
-    console.log('No email in Typeform submission, skipping automated email');
+    console.log('[AutoEmail] No email in Typeform submission, skipping automated email');
     return;
   }
 
@@ -407,13 +414,15 @@ Stefan`;
   try {
     // Check if Gmail is configured
     if (!process.env.STEF_GOOGLE_CLIENT_ID || !process.env.STEF_GOOGLE_REFRESH_TOKEN) {
-      console.log('Gmail not configured, skipping automated email');
+      console.log('[AutoEmail] Gmail not configured - missing STEF_GOOGLE_CLIENT_ID or STEF_GOOGLE_REFRESH_TOKEN');
       return;
     }
+    console.log('[AutoEmail] Gmail credentials found, proceeding with email send');
 
     // Send email
-    console.log(`Sending automated email to ${recipientEmail}`);
+    console.log(`[AutoEmail] Sending email to ${recipientEmail}...`);
     const emailResult = await gmailService.sendEmail(recipientEmail, subject, body);
+    console.log(`[AutoEmail] Email sent successfully! Thread ID: ${emailResult.threadId}, Message ID: ${emailResult.messageId}`);
 
     // Create email thread record
     await pool.query(`
@@ -446,31 +455,46 @@ Stefan`;
       gmail_thread_id: emailResult.threadId
     })]);
 
-    console.log(`Email sent successfully to ${recipientEmail}, thread: ${emailResult.threadId}`);
+    console.log(`[AutoEmail] Email records saved for ${recipientEmail}`);
 
-    // Create Slack thread on Zapier message
+    // Create Slack thread on Zapier message with retry logic
     if (process.env.CA_PRO_APPLICATION_SLACK_CHANNEL_ID) {
-      // Wait a few seconds for Zapier message to arrive
-      await new Promise(resolve => setTimeout(resolve, 5000));
+      console.log('[AutoEmail] Slack channel configured, attempting to create thread...');
 
-      const threadResult = await createApplicationThread(
-        pool,
-        applicationId,
-        recipientEmail,
-        firstName,
-        subject,
-        body
-      );
+      // Retry up to 3 times with increasing delays (10s, 20s, 30s)
+      let threadResult = null;
+      const retryDelays = [10000, 20000, 30000];
 
-      if (threadResult) {
-        console.log(`Slack thread created for ${recipientEmail}`);
-      } else {
-        console.log(`No Zapier message found for ${recipientEmail}, Slack thread not created`);
+      for (let attempt = 0; attempt < retryDelays.length; attempt++) {
+        console.log(`[AutoEmail] Waiting ${retryDelays[attempt] / 1000}s before Slack thread attempt ${attempt + 1}...`);
+        await new Promise(resolve => setTimeout(resolve, retryDelays[attempt]));
+
+        threadResult = await createApplicationThread(
+          pool,
+          applicationId,
+          recipientEmail,
+          firstName,
+          subject,
+          body
+        );
+
+        if (threadResult) {
+          console.log(`[AutoEmail] Slack thread created successfully on attempt ${attempt + 1} for ${recipientEmail}`);
+          break;
+        } else {
+          console.log(`[AutoEmail] Slack thread attempt ${attempt + 1} failed - Zapier message not found yet`);
+        }
       }
+
+      if (!threadResult) {
+        console.log(`[AutoEmail] Could not create Slack thread after ${retryDelays.length} attempts - Zapier message not found for ${recipientEmail}`);
+      }
+    } else {
+      console.log('[AutoEmail] CA_PRO_APPLICATION_SLACK_CHANNEL_ID not set, skipping Slack thread');
     }
 
   } catch (error) {
-    console.error('Error sending automated email:', error);
+    console.error('[AutoEmail] Error in automated email/Slack flow:', error);
     // Log the error but don't throw - this is a background process
     await pool.query(`
       INSERT INTO activity_log (action, entity_type, entity_id, details)

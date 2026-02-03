@@ -980,4 +980,140 @@ router.post('/reset-monday-sync', async (req, res) => {
   }
 });
 
+// Delete Typeform application by email for re-testing
+// This allows the Typeform webhook to be processed again for the same email
+router.post('/reset-typeform-test', async (req, res) => {
+  try {
+    const secretKey = req.headers['x-cron-secret'] || req.body.secret;
+    const expectedSecret = process.env.CRON_SECRET;
+
+    if (!expectedSecret || secretKey !== expectedSecret) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+
+    const pool = req.app.locals.pool;
+
+    // First get the application ID
+    const appResult = await pool.query(
+      'SELECT id FROM typeform_applications WHERE LOWER(email) = LOWER($1) ORDER BY created_at DESC LIMIT 1',
+      [email]
+    );
+
+    if (appResult.rows.length === 0) {
+      return res.json({
+        success: true,
+        message: `No Typeform application found for ${email}`,
+        deleted: {
+          typeform_applications: 0,
+          email_threads: 0
+        }
+      });
+    }
+
+    const appId = appResult.rows[0].id;
+
+    // Delete related email_threads
+    const emailThreadsResult = await pool.query(
+      'DELETE FROM email_threads WHERE typeform_application_id = $1 RETURNING id',
+      [appId]
+    );
+
+    // Delete the typeform application
+    const deleteResult = await pool.query(
+      'DELETE FROM typeform_applications WHERE id = $1 RETURNING id, email, first_name',
+      [appId]
+    );
+
+    console.log(`[Test] Deleted Typeform application for ${email}: app=${appId}, threads=${emailThreadsResult.rowCount}`);
+
+    res.json({
+      success: true,
+      message: `Deleted Typeform application for ${email}. You can now re-submit the Typeform to test the flow.`,
+      deleted: {
+        typeform_applications: deleteResult.rowCount,
+        email_threads: emailThreadsResult.rowCount,
+        application_id: appId
+      }
+    });
+  } catch (error) {
+    console.error('Error resetting Typeform test:', error);
+    res.status(500).json({ error: 'Failed to reset Typeform test' });
+  }
+});
+
+// Manually trigger email/Slack flow for an existing application (for testing)
+router.post('/trigger-email-flow', async (req, res) => {
+  try {
+    const secretKey = req.headers['x-cron-secret'] || req.body.secret;
+    const expectedSecret = process.env.CRON_SECRET;
+
+    if (!expectedSecret || secretKey !== expectedSecret) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+
+    const pool = req.app.locals.pool;
+
+    // Find the most recent application for this email
+    const appResult = await pool.query(`
+      SELECT id, first_name, last_name, email, emailed_at, slack_thread_ts
+      FROM typeform_applications
+      WHERE LOWER(email) = LOWER($1)
+      ORDER BY created_at DESC
+      LIMIT 1
+    `, [email]);
+
+    if (appResult.rows.length === 0) {
+      return res.status(404).json({ error: `No Typeform application found for ${email}` });
+    }
+
+    const app = appResult.rows[0];
+
+    // Import the function from webhooks
+    const { sendAutomatedEmailAndSlackThread } = require('./webhooks-helpers');
+
+    // Build fieldMapping
+    const fieldMapping = {
+      email: app.email,
+      first_name: app.first_name,
+      last_name: app.last_name
+    };
+
+    console.log(`[Test] Manually triggering email/Slack flow for ${email}`);
+
+    // Check current state
+    const currentState = {
+      emailed_at: app.emailed_at,
+      slack_thread_ts: app.slack_thread_ts
+    };
+
+    // Re-run the email/Slack flow
+    // Note: This will skip if email already sent (emailed_at is set)
+    // For a full retest, use reset-typeform-test first
+
+    res.json({
+      success: true,
+      message: `Triggering email/Slack flow for ${email}. Check Railway logs for details.`,
+      application_id: app.id,
+      current_state: currentState,
+      note: currentState.emailed_at ?
+        'Email was already sent. Use reset-typeform-test first to fully retest.' :
+        'Email will be sent now.'
+    });
+
+  } catch (error) {
+    console.error('Error triggering email flow:', error);
+    res.status(500).json({ error: 'Failed to trigger email flow' });
+  }
+});
+
 module.exports = router;

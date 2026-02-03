@@ -168,6 +168,8 @@ body {
     margin-left: var(--sidebar-width);
     padding: 24px 32px;
     min-height: 100vh;
+    overflow-x: hidden;
+    max-width: calc(100vw - var(--sidebar-width));
 }
 
 /* Content Header */
@@ -368,7 +370,7 @@ body {
 /* Overview Grid */
 .overview-grid {
     display: grid;
-    grid-template-columns: 2fr 1fr;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
     gap: 20px;
 }
 
@@ -379,6 +381,7 @@ body {
     gap: 12px;
     max-height: 400px;
     overflow-y: auto;
+    overflow-x: hidden;
 }
 
 .activity-item {
@@ -417,6 +420,8 @@ body {
 .activity-text {
     font-size: 0.9rem;
     color: var(--gray-700);
+    word-break: break-word;
+    overflow-wrap: break-word;
 }
 
 .activity-time {

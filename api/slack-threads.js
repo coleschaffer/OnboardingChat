@@ -47,7 +47,8 @@ function slackRequest(method, endpoint, body = null) {
 
 /**
  * Find the Zapier message for a CA Pro application in the channel
- * Searches messages from the last 30 minutes that contain "Product: CA Pro" and the applicant's email
+ * Searches messages from the last 2 hours that contain "Product: CA Pro" and the applicant's email
+ * Returns the MOST RECENT matching message
  *
  * @param {string} email - Applicant's email to search for
  * @param {string} channelId - Channel to search in (defaults to CA_PRO_APPLICATION_SLACK_CHANNEL_ID)
@@ -55,30 +56,42 @@ function slackRequest(method, endpoint, body = null) {
  */
 async function findZapierMessage(email, channelId = CA_PRO_CHANNEL_ID) {
     if (!channelId) {
-        console.error('CA_PRO_APPLICATION_SLACK_CHANNEL_ID not set');
+        console.error('[Slack] CA_PRO_APPLICATION_SLACK_CHANNEL_ID not set');
         return null;
     }
 
-    try {
-        // Search last 30 minutes of channel history
-        const thirtyMinutesAgo = Math.floor((Date.now() - 30 * 60 * 1000) / 1000);
+    console.log(`[Slack] Searching for Zapier message for email: ${email} in channel: ${channelId}`);
 
-        const response = await slackRequest('GET', `conversations.history?channel=${channelId}&oldest=${thirtyMinutesAgo}&limit=50`);
+    try {
+        // Search last 2 hours of channel history (extended from 30 minutes)
+        const twoHoursAgo = Math.floor((Date.now() - 2 * 60 * 60 * 1000) / 1000);
+
+        const response = await slackRequest('GET', `conversations.history?channel=${channelId}&oldest=${twoHoursAgo}&limit=100`);
 
         if (!response.ok) {
-            console.error('Failed to fetch channel history:', response.error);
+            console.error('[Slack] Failed to fetch channel history:', response.error);
             return null;
         }
 
-        // Look for message containing "Product: CA Pro" and the applicant's email
+        console.log(`[Slack] Found ${response.messages?.length || 0} messages in channel history`);
+
+        // Messages are returned newest-first, so find() returns the most recent match
         const zapierMessage = response.messages?.find(msg => {
             const text = msg.text || '';
-            return text.includes('Product: CA Pro') && text.toLowerCase().includes(email.toLowerCase());
+            const matches = text.includes('Product: CA Pro') && text.toLowerCase().includes(email.toLowerCase());
+            if (matches) {
+                console.log(`[Slack] Found matching Zapier message with ts: ${msg.ts}`);
+            }
+            return matches;
         });
+
+        if (!zapierMessage) {
+            console.log(`[Slack] No Zapier message found for ${email} - searched ${response.messages?.length || 0} messages`);
+        }
 
         return zapierMessage || null;
     } catch (error) {
-        console.error('Error finding Zapier message:', error);
+        console.error('[Slack] Error finding Zapier message:', error);
         return null;
     }
 }
