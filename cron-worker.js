@@ -48,9 +48,17 @@ async function runCronJobs() {
   // Process Monday.com syncs (10 minutes after OnboardingChat completion)
   results.mondaySyncs = await callJobEndpoint('process-monday-syncs', 'Monday.com Syncs');
 
+  // Process email replies (check Gmail threads for new replies)
+  results.emailReplies = await callJobEndpoint('process-email-replies', 'Email Replies');
+
+  // Process pending email sends (30-second undo window passed)
+  results.pendingEmails = await callJobEndpoint('process-pending-emails', 'Pending Emails');
+
   console.log('\n=== Cron Jobs Summary ===');
   console.log('Delayed Welcomes:', results.delayedWelcomes.success ? 'OK' : 'FAILED');
   console.log('Monday.com Syncs:', results.mondaySyncs.success ? 'OK' : 'FAILED');
+  console.log('Email Replies:', results.emailReplies.success ? 'OK' : 'FAILED');
+  console.log('Pending Emails:', results.pendingEmails.success ? 'OK' : 'FAILED');
 
   const allSuccess = Object.values(results).every(r => r.success);
   console.log('\nCompleted', allSuccess ? 'successfully' : 'with errors');

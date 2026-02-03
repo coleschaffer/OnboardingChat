@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const { syncOnboardingToMonday } = require('./monday');
+const { gmailService } = require('../lib/gmail');
+const { postReplyNotification } = require('./slack-threads');
 
 // Helper to convert revenue to generalized format
 function generalizeRevenue(revenue) {
@@ -670,6 +672,277 @@ router.post('/process-monday-syncs', async (req, res) => {
 // Health check for cron job monitoring
 router.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Process email replies - check tracked Gmail threads for new replies
+router.post('/process-email-replies', async (req, res) => {
+  try {
+    // Verify secret key
+    const secretKey = req.headers['x-cron-secret'] || req.body.secret;
+    const expectedSecret = process.env.CRON_SECRET;
+
+    if (!expectedSecret) {
+      console.error('CRON_SECRET not configured');
+      return res.status(500).json({ error: 'Server not configured for cron jobs' });
+    }
+
+    if (secretKey !== expectedSecret) {
+      console.error('Invalid cron secret provided');
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    // Check if Gmail is configured
+    if (!process.env.STEF_GOOGLE_CLIENT_ID || !process.env.STEF_GOOGLE_REFRESH_TOKEN) {
+      console.log('Gmail not configured, skipping email reply check');
+      return res.json({ success: true, skipped: true, reason: 'Gmail not configured' });
+    }
+
+    const pool = req.app.locals.pool;
+    console.log('Checking for email replies...');
+
+    // Get all email threads that don't have a reply yet
+    const threadsResult = await pool.query(`
+      SELECT et.*, ta.first_name, ta.last_name
+      FROM email_threads et
+      LEFT JOIN typeform_applications ta ON et.typeform_application_id = ta.id
+      WHERE et.has_reply = false
+        AND et.gmail_thread_id IS NOT NULL
+        AND et.status = 'sent'
+      ORDER BY et.created_at ASC
+      LIMIT 50
+    `);
+
+    const results = {
+      checked: 0,
+      replies_found: 0,
+      errors: []
+    };
+
+    for (const thread of threadsResult.rows) {
+      try {
+        results.checked++;
+
+        const replyCheck = await gmailService.checkForReplies(
+          thread.gmail_thread_id,
+          thread.gmail_message_id
+        );
+
+        if (replyCheck.hasReply) {
+          results.replies_found++;
+          console.log(`Reply found for ${thread.recipient_email}`);
+
+          // Update email_threads record
+          await pool.query(`
+            UPDATE email_threads SET
+              has_reply = true,
+              reply_received_at = CURRENT_TIMESTAMP,
+              reply_count = $1,
+              last_reply_snippet = $2,
+              last_reply_body = $3,
+              status = 'replied'
+            WHERE id = $4
+          `, [
+            replyCheck.replyCount,
+            replyCheck.latestReply?.snippet,
+            replyCheck.latestReply?.body,
+            thread.id
+          ]);
+
+          // Update typeform_applications with replied_at timestamp
+          if (thread.typeform_application_id) {
+            await pool.query(
+              'UPDATE typeform_applications SET replied_at = CURRENT_TIMESTAMP WHERE id = $1 AND replied_at IS NULL',
+              [thread.typeform_application_id]
+            );
+          }
+
+          // Log activity
+          await pool.query(`
+            INSERT INTO activity_log (action, entity_type, entity_id, details)
+            VALUES ($1, $2, $3, $4)
+          `, ['email_reply_received', 'typeform_application', thread.typeform_application_id, JSON.stringify({
+            email: thread.recipient_email,
+            gmail_thread_id: thread.gmail_thread_id,
+            reply_snippet: replyCheck.latestReply?.snippet?.substring(0, 100)
+          })]);
+
+          // Post notification to Slack thread
+          if (thread.typeform_application_id) {
+            try {
+              const recipientName = `${thread.first_name || ''} ${thread.last_name || ''}`.trim() || thread.recipient_email;
+              await postReplyNotification(
+                pool,
+                thread.typeform_application_id,
+                recipientName,
+                thread.recipient_email,
+                replyCheck.latestReply?.snippet,
+                replyCheck.latestReply?.body,
+                thread.gmail_thread_id
+              );
+              console.log(`Posted reply notification to Slack for ${thread.recipient_email}`);
+            } catch (slackError) {
+              console.error('Failed to post Slack notification:', slackError.message);
+            }
+          }
+        }
+      } catch (error) {
+        console.error(`Error checking thread ${thread.id}:`, error.message);
+        results.errors.push({ thread_id: thread.id, error: error.message });
+      }
+    }
+
+    console.log('Email reply check complete:', results);
+    res.json({
+      success: true,
+      ...results
+    });
+  } catch (error) {
+    console.error('Error processing email replies:', error);
+    res.status(500).json({ error: 'Failed to process email replies' });
+  }
+});
+
+// Process pending email sends (30-second undo window)
+router.post('/process-pending-emails', async (req, res) => {
+  try {
+    // Verify secret key
+    const secretKey = req.headers['x-cron-secret'] || req.body.secret;
+    const expectedSecret = process.env.CRON_SECRET;
+
+    if (!expectedSecret) {
+      console.error('CRON_SECRET not configured');
+      return res.status(500).json({ error: 'Server not configured for cron jobs' });
+    }
+
+    if (secretKey !== expectedSecret) {
+      console.error('Invalid cron secret provided');
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    // Check if Gmail is configured
+    if (!process.env.STEF_GOOGLE_CLIENT_ID || !process.env.STEF_GOOGLE_REFRESH_TOKEN) {
+      console.log('Gmail not configured, skipping pending email processing');
+      return res.json({ success: true, skipped: true, reason: 'Gmail not configured' });
+    }
+
+    const pool = req.app.locals.pool;
+    console.log('Processing pending email sends...');
+
+    // Find pending emails whose send_at time has passed
+    const pendingResult = await pool.query(`
+      SELECT pe.*, ta.first_name, ta.last_name
+      FROM pending_email_sends pe
+      LEFT JOIN typeform_applications ta ON pe.typeform_application_id = ta.id
+      WHERE pe.status = 'pending'
+        AND pe.send_at <= NOW()
+      ORDER BY pe.send_at ASC
+      LIMIT 20
+    `);
+
+    const results = {
+      processed: 0,
+      sent: 0,
+      errors: []
+    };
+
+    const slackBlocks = require('../lib/slack-blocks');
+    const { postMessage } = require('./slack-threads');
+
+    for (const pending of pendingResult.rows) {
+      results.processed++;
+
+      try {
+        // Get the existing thread to reply to
+        let threadId = pending.gmail_thread_id;
+        let messageId = null;
+
+        // If we have a thread ID, get the latest message ID for proper threading
+        if (threadId) {
+          try {
+            const thread = await gmailService.getThread(threadId);
+            if (thread.messages && thread.messages.length > 0) {
+              const lastMessage = thread.messages[thread.messages.length - 1];
+              messageId = lastMessage.payload.headers.find(h => h.name.toLowerCase() === 'message-id')?.value;
+            }
+          } catch (e) {
+            console.log('Could not get thread for reply:', e.message);
+          }
+        }
+
+        // Send the email
+        const subject = pending.subject || 'Re: Thanks for applying to CA Pro';
+        const emailResult = await gmailService.sendEmail(
+          pending.to_email,
+          subject,
+          pending.body,
+          threadId,
+          messageId
+        );
+
+        // Update pending email status
+        await pool.query(`
+          UPDATE pending_email_sends SET
+            status = 'sent',
+            sent_at = CURRENT_TIMESTAMP,
+            gmail_thread_id = $1
+          WHERE id = $2
+        `, [emailResult.threadId, pending.id]);
+
+        // Log activity
+        await pool.query(`
+          INSERT INTO activity_log (action, entity_type, entity_id, details)
+          VALUES ($1, $2, $3, $4)
+        `, ['email_reply_sent', 'typeform_application', pending.typeform_application_id, JSON.stringify({
+          email: pending.to_email,
+          gmail_thread_id: emailResult.threadId,
+          user_id: pending.user_id
+        })]);
+
+        // Post confirmation to Slack thread
+        if (pending.channel_id && pending.thread_ts) {
+          try {
+            const confirmBlock = slackBlocks.createEmailSentConfirmationBlock(
+              pending.to_email,
+              pending.body
+            );
+            await postMessage(
+              pending.channel_id,
+              confirmBlock.text,
+              confirmBlock.blocks,
+              pending.thread_ts
+            );
+          } catch (slackError) {
+            console.error('Failed to post Slack confirmation:', slackError.message);
+          }
+        }
+
+        results.sent++;
+        console.log(`Sent pending email to ${pending.to_email}`);
+
+      } catch (error) {
+        console.error(`Error sending pending email ${pending.id}:`, error.message);
+
+        // Mark as failed
+        await pool.query(`
+          UPDATE pending_email_sends SET
+            status = 'failed',
+            error_message = $1
+          WHERE id = $2
+        `, [error.message, pending.id]);
+
+        results.errors.push({ pending_id: pending.id, error: error.message });
+      }
+    }
+
+    console.log('Pending email processing complete:', results);
+    res.json({
+      success: true,
+      ...results
+    });
+  } catch (error) {
+    console.error('Error processing pending emails:', error);
+    res.status(500).json({ error: 'Failed to process pending emails' });
+  }
 });
 
 // Reset Monday sync for testing - requires cron secret

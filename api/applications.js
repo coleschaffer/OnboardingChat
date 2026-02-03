@@ -7,14 +7,23 @@ router.get('/', async (req, res) => {
     const pool = req.app.locals.pool;
     const { status, search, limit = 50, offset = 0 } = req.query;
 
-    // Query applications with a flag indicating if there's a matching onboarding submission
+    // Query applications with computed display_status and has_onboarding flag
     let query = `
       SELECT ta.*,
         CASE WHEN EXISTS (
           SELECT 1 FROM onboarding_submissions os
           JOIN business_owners bo ON os.business_owner_id = bo.id
           WHERE LOWER(bo.email) = LOWER(ta.email)
-        ) THEN true ELSE false END as has_onboarding
+        ) THEN true ELSE false END as has_onboarding,
+        CASE
+          WHEN ta.onboarding_completed_at IS NOT NULL THEN 'onboarding_complete'
+          WHEN ta.onboarding_started_at IS NOT NULL THEN 'onboarding_started'
+          WHEN ta.call_booked_at IS NOT NULL THEN 'call_booked'
+          WHEN ta.replied_at IS NOT NULL THEN 'replied'
+          WHEN ta.emailed_at IS NOT NULL THEN 'emailed'
+          ELSE 'new'
+        END as display_status,
+        COALESCE(ta.onboarding_completed_at, ta.onboarding_started_at, ta.call_booked_at, ta.replied_at, ta.emailed_at) as status_timestamp
       FROM typeform_applications ta
       WHERE 1=1
     `;
@@ -100,10 +109,20 @@ router.get('/:id', async (req, res) => {
     const pool = req.app.locals.pool;
     const { id } = req.params;
 
-    const result = await pool.query(
-      'SELECT * FROM typeform_applications WHERE id = $1',
-      [id]
-    );
+    const result = await pool.query(`
+      SELECT ta.*,
+        CASE
+          WHEN ta.onboarding_completed_at IS NOT NULL THEN 'onboarding_complete'
+          WHEN ta.onboarding_started_at IS NOT NULL THEN 'onboarding_started'
+          WHEN ta.call_booked_at IS NOT NULL THEN 'call_booked'
+          WHEN ta.replied_at IS NOT NULL THEN 'replied'
+          WHEN ta.emailed_at IS NOT NULL THEN 'emailed'
+          ELSE 'new'
+        END as display_status,
+        COALESCE(ta.onboarding_completed_at, ta.onboarding_started_at, ta.call_booked_at, ta.replied_at, ta.emailed_at) as status_timestamp
+      FROM typeform_applications ta
+      WHERE ta.id = $1
+    `, [id]);
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Application not found' });

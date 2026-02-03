@@ -42,11 +42,13 @@ app.use('/api/team-members', require('./api/team-members'));
 app.use('/api/applications', require('./api/applications'));
 app.use('/api/onboarding', require('./api/onboarding'));
 app.use('/api/webhooks', require('./api/webhooks'));
+app.use('/api/webhooks/calendly', require('./api/calendly'));
 app.use('/api/import', require('./api/import'));
 app.use('/api/stats', require('./api/stats'));
 app.use('/api', require('./api/validate'));
 app.use('/api/slack', require('./api/slack'));
 app.use('/api/jobs', require('./api/jobs'));
+app.use('/api/notes', require('./api/notes'));
 
 // Serve admin dashboard
 app.use('/admin', express.static(path.join(__dirname, 'admin')));
@@ -163,6 +165,118 @@ async function runMigrations() {
           WHERE table_name = 'typeform_applications' AND column_name = 'has_team' AND data_type = 'boolean'
         ) THEN
           ALTER TABLE typeform_applications ALTER COLUMN has_team TYPE VARCHAR(255) USING CASE WHEN has_team THEN 'Yes' ELSE 'No' END;
+        END IF;
+      END $$
+    `);
+
+    // Migration 007: Email threads, Slack threading, Calendly, Notes
+    // Email threads table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS email_threads (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        gmail_thread_id VARCHAR(255) UNIQUE,
+        gmail_message_id VARCHAR(255),
+        typeform_application_id UUID REFERENCES typeform_applications(id),
+        recipient_email VARCHAR(255) NOT NULL,
+        recipient_first_name VARCHAR(255),
+        subject VARCHAR(500),
+        initial_email_sent_at TIMESTAMP WITH TIME ZONE,
+        has_reply BOOLEAN DEFAULT FALSE,
+        reply_received_at TIMESTAMP WITH TIME ZONE,
+        reply_count INTEGER DEFAULT 0,
+        last_reply_snippet TEXT,
+        last_reply_body TEXT,
+        status VARCHAR(50) DEFAULT 'sent',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_email_threads_gmail_thread ON email_threads(gmail_thread_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_email_threads_typeform ON email_threads(typeform_application_id)`);
+
+    // Pending email sends table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS pending_email_sends (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        to_email VARCHAR(255) NOT NULL,
+        subject VARCHAR(500),
+        body TEXT NOT NULL,
+        gmail_thread_id VARCHAR(255),
+        typeform_application_id UUID REFERENCES typeform_applications(id),
+        user_id VARCHAR(50) NOT NULL,
+        channel_id VARCHAR(50) NOT NULL,
+        thread_ts VARCHAR(50),
+        message_ts VARCHAR(50),
+        send_at TIMESTAMP WITH TIME ZONE NOT NULL,
+        status VARCHAR(20) DEFAULT 'pending',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        cancelled_at TIMESTAMP WITH TIME ZONE,
+        sent_at TIMESTAMP WITH TIME ZONE,
+        error_message TEXT
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_pending_email_sends_status ON pending_email_sends(status)`);
+
+    // Application notes table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS application_notes (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        application_id UUID REFERENCES typeform_applications(id) ON DELETE CASCADE,
+        note_text TEXT NOT NULL,
+        created_by VARCHAR(255) DEFAULT 'admin',
+        slack_synced BOOLEAN DEFAULT FALSE,
+        slack_message_ts VARCHAR(50),
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_application_notes_application ON application_notes(application_id)`);
+
+    // Calendly webhook subscriptions table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS calendly_webhook_subscriptions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        webhook_uri VARCHAR(500) NOT NULL,
+        signing_key VARCHAR(255) NOT NULL,
+        organization_uri VARCHAR(500),
+        scope VARCHAR(50),
+        state VARCHAR(50) DEFAULT 'active',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Add new columns to typeform_applications
+    await pool.query(`
+      DO $$
+      BEGIN
+        -- Slack thread tracking
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'typeform_applications' AND column_name = 'slack_channel_id') THEN
+          ALTER TABLE typeform_applications ADD COLUMN slack_channel_id VARCHAR(50);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'typeform_applications' AND column_name = 'slack_thread_ts') THEN
+          ALTER TABLE typeform_applications ADD COLUMN slack_thread_ts VARCHAR(50);
+        END IF;
+        -- Status timestamps
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'typeform_applications' AND column_name = 'emailed_at') THEN
+          ALTER TABLE typeform_applications ADD COLUMN emailed_at TIMESTAMP WITH TIME ZONE;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'typeform_applications' AND column_name = 'replied_at') THEN
+          ALTER TABLE typeform_applications ADD COLUMN replied_at TIMESTAMP WITH TIME ZONE;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'typeform_applications' AND column_name = 'call_booked_at') THEN
+          ALTER TABLE typeform_applications ADD COLUMN call_booked_at TIMESTAMP WITH TIME ZONE;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'typeform_applications' AND column_name = 'onboarding_started_at') THEN
+          ALTER TABLE typeform_applications ADD COLUMN onboarding_started_at TIMESTAMP WITH TIME ZONE;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'typeform_applications' AND column_name = 'onboarding_completed_at') THEN
+          ALTER TABLE typeform_applications ADD COLUMN onboarding_completed_at TIMESTAMP WITH TIME ZONE;
         END IF;
       END $$
     `);

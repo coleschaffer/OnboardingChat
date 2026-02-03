@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
+const { gmailService } = require('../lib/gmail');
+const { createApplicationThread } = require('./slack-threads');
 
 // Typeform webhook handler
 router.post('/typeform', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -200,9 +202,16 @@ router.post('/typeform', express.raw({ type: 'application/json' }), async (req, 
 
     console.log(`New Typeform application received: ${result.rows[0].id}`);
 
+    const applicationId = result.rows[0].id;
+
+    // Send automated email and create Slack thread (async - don't block response)
+    sendAutomatedEmailAndSlackThread(pool, applicationId, fieldMapping).catch(err => {
+      console.error('Error in automated email/Slack flow:', err);
+    });
+
     res.status(200).json({
       success: true,
-      application_id: result.rows[0].id
+      application_id: applicationId
     });
   } catch (error) {
     console.error('Error processing Typeform webhook:', error);
@@ -370,5 +379,107 @@ router.post('/samcart', async (req, res) => {
 router.get('/samcart/test', (req, res) => {
   res.json({ message: 'SamCart webhook endpoint is active' });
 });
+
+/**
+ * Send automated email on Typeform submission and create Slack thread
+ */
+async function sendAutomatedEmailAndSlackThread(pool, applicationId, fieldMapping) {
+  const recipientEmail = fieldMapping.email;
+  const firstName = fieldMapping.first_name || 'there';
+
+  if (!recipientEmail) {
+    console.log('No email in Typeform submission, skipping automated email');
+    return;
+  }
+
+  const CALENDLY_URL = 'https://calendly.com/stefanpaulgeorgi/ca-pro-1-1-with-stefan';
+
+  const subject = 'Thanks for applying to CA Pro';
+  const body = `Hey ${firstName}, thanks for taking some time to apply to CA Pro. I'm reaching out directly to schedule a quick call to discuss the mastermind and see if it's a good fit for both sides.
+
+Here's a calendar link where you can book a call: ${CALENDLY_URL}
+
+If none of those times work for any reason, let me know and we'll find a time that does.
+
+Best,
+Stefan`;
+
+  try {
+    // Check if Gmail is configured
+    if (!process.env.STEF_GOOGLE_CLIENT_ID || !process.env.STEF_GOOGLE_REFRESH_TOKEN) {
+      console.log('Gmail not configured, skipping automated email');
+      return;
+    }
+
+    // Send email
+    console.log(`Sending automated email to ${recipientEmail}`);
+    const emailResult = await gmailService.sendEmail(recipientEmail, subject, body);
+
+    // Create email thread record
+    await pool.query(`
+      INSERT INTO email_threads (
+        gmail_thread_id, gmail_message_id, typeform_application_id,
+        recipient_email, recipient_first_name, subject, initial_email_sent_at, status
+      ) VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, 'sent')
+    `, [
+      emailResult.threadId,
+      emailResult.messageId,
+      applicationId,
+      recipientEmail,
+      firstName,
+      subject
+    ]);
+
+    // Update typeform_applications with emailed_at timestamp
+    await pool.query(
+      'UPDATE typeform_applications SET emailed_at = CURRENT_TIMESTAMP WHERE id = $1',
+      [applicationId]
+    );
+
+    // Log activity
+    await pool.query(`
+      INSERT INTO activity_log (action, entity_type, entity_id, details)
+      VALUES ($1, $2, $3, $4)
+    `, ['email_sent', 'typeform_application', applicationId, JSON.stringify({
+      email: recipientEmail,
+      subject: subject,
+      gmail_thread_id: emailResult.threadId
+    })]);
+
+    console.log(`Email sent successfully to ${recipientEmail}, thread: ${emailResult.threadId}`);
+
+    // Create Slack thread on Zapier message
+    if (process.env.CA_PRO_APPLICATION_SLACK_CHANNEL_ID) {
+      // Wait a few seconds for Zapier message to arrive
+      await new Promise(resolve => setTimeout(resolve, 5000));
+
+      const threadResult = await createApplicationThread(
+        pool,
+        applicationId,
+        recipientEmail,
+        firstName,
+        subject,
+        body
+      );
+
+      if (threadResult) {
+        console.log(`Slack thread created for ${recipientEmail}`);
+      } else {
+        console.log(`No Zapier message found for ${recipientEmail}, Slack thread not created`);
+      }
+    }
+
+  } catch (error) {
+    console.error('Error sending automated email:', error);
+    // Log the error but don't throw - this is a background process
+    await pool.query(`
+      INSERT INTO activity_log (action, entity_type, entity_id, details)
+      VALUES ($1, $2, $3, $4)
+    `, ['email_send_failed', 'typeform_application', applicationId, JSON.stringify({
+      email: recipientEmail,
+      error: error.message
+    })]);
+  }
+}
 
 module.exports = router;

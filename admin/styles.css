@@ -531,13 +531,21 @@ body {
     text-transform: capitalize;
 }
 
-.status-badge.new { background: #dbeafe; color: #1d4ed8; }
+.status-badge.new { background: #e5e7eb; color: #374151; }
 .status-badge.reviewed { background: #fef3c7; color: #92400e; }
 .status-badge.approved { background: #d1fae5; color: #065f46; }
 .status-badge.rejected { background: #fee2e2; color: #991b1b; }
 .status-badge.pending { background: #fef3c7; color: #92400e; }
 .status-badge.in_progress { background: #dbeafe; color: #1d4ed8; }
 .status-badge.completed { background: #d1fae5; color: #065f46; }
+
+/* New status badges for CA Pro flow */
+.status-badge.emailed { background: #dbeafe; color: #1d4ed8; }
+.status-badge.replied { background: #fef3c7; color: #92400e; }
+.status-badge.call_booked { background: #d1fae5; color: #065f46; }
+.status-badge.onboarding_started { background: #e9d5ff; color: #6b21a8; }
+.status-badge.onboarding_complete { background: #d1fae5; color: #065f46; }
+.status-badge.onboarding_complete::after { content: ' '; }
 
 /* Action Buttons */
 .action-btns {
@@ -1127,4 +1135,96 @@ body {
     font-size: 0.9rem;
     margin-top: 12px;
     min-height: 20px;
+}
+
+/* Notes Section */
+.notes-section {
+    margin-top: 24px;
+    padding-top: 20px;
+    border-top: 1px solid var(--gray-200);
+}
+
+.notes-section h4 {
+    font-family: 'Montserrat', sans-serif;
+    font-size: 1rem;
+    font-weight: 600;
+    margin-bottom: 12px;
+    color: var(--gray-700);
+}
+
+.notes-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 200px;
+    overflow-y: auto;
+    margin-bottom: 16px;
+}
+
+.note-item {
+    background: var(--gray-50);
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 0.9rem;
+}
+
+.note-item .note-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 0.8rem;
+    color: var(--gray-500);
+}
+
+.note-item .note-meta .note-author {
+    font-weight: 500;
+}
+
+.note-item .note-text {
+    color: var(--gray-700);
+    line-height: 1.4;
+}
+
+.note-item .slack-synced {
+    color: var(--green);
+    font-size: 0.75rem;
+}
+
+.add-note-form {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.add-note-form textarea {
+    width: 100%;
+    padding: 12px;
+    border: 1px solid var(--gray-300);
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 0.9rem;
+    resize: vertical;
+    min-height: 80px;
+}
+
+.add-note-form textarea:focus {
+    outline: none;
+    border-color: var(--primary-orange);
+}
+
+.add-note-form button {
+    align-self: flex-end;
+}
+
+/* Status timestamp display */
+.status-with-time {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.status-time {
+    font-size: 0.7rem;
+    color: var(--gray-500);
 }

@@ -237,6 +237,10 @@ function getActivityIcon(action) {
     if (action.includes('created') || action.includes('new')) return 'new';
     if (action.includes('import')) return 'import';
     if (action.includes('circle') || action.includes('activecampaign') || action.includes('monday')) return 'sync';
+    if (action.includes('email')) return 'email';
+    if (action.includes('call_booked')) return 'call';
+    if (action.includes('note')) return 'note';
+    if (action.includes('slack')) return 'slack';
     return 'update';
 }
 
@@ -298,6 +302,24 @@ function formatActivityText(activity) {
             return `📊 Monday: ${details.count || 1} partner(s) added as subitems`;
         case 'monday_sync_failed':
             return `❌ Monday sync failed: ${details.errors?.length || 1} error(s)`;
+        case 'email_sent':
+            return `📧 Email sent to <strong>${details.email || 'Unknown'}</strong>`;
+        case 'email_send_failed':
+            return `❌ Email failed to <strong>${details.email || 'Unknown'}</strong>: ${details.error || 'Error'}`;
+        case 'email_reply_received':
+            return `💬 Email reply from <strong>${details.email || 'Unknown'}</strong>`;
+        case 'email_reply_sent':
+            return `📤 Email reply sent to <strong>${details.email || 'Unknown'}</strong>`;
+        case 'call_booked':
+            return `📅 Call booked: <strong>${details.email || 'Unknown'}</strong>`;
+        case 'note_added':
+            return `📝 Note added by <strong>${details.created_by || 'admin'}</strong>`;
+        case 'slack_thread_created':
+            return `💬 Slack thread created for <strong>${details.email || 'Unknown'}</strong>`;
+        case 'onboarding_started':
+            return `🚀 Onboarding started: <strong>${details.email || 'Unknown'}</strong>`;
+        case 'onboarding_completed':
+            return `✅ Onboarding completed: <strong>${details.email || details.business_name || 'Unknown'}</strong>`;
         default:
             return activity.action.replace(/_/g, ' ');
     }
@@ -353,16 +375,21 @@ async function loadApplications() {
             tbody.innerHTML = '<tr><td colspan="6" class="loading">No applications found</td></tr>';
         } else {
             tbody.innerHTML = data.applications.map(app => {
-                // If has matching onboarding, show "Complete" instead of original status
-                const displayStatus = app.has_onboarding ? 'completed' : app.status;
-                const displayStatusText = app.has_onboarding ? 'Complete' : app.status;
+                // Use computed display_status from API
+                const displayStatus = app.display_status || 'new';
+                const statusInfo = formatDisplayStatus(displayStatus, app.status_timestamp);
 
                 return `
                 <tr>
                     <td><strong>${app.first_name || ''} ${app.last_name || ''}</strong></td>
                     <td>${app.email || '-'}</td>
                     <td>${app.annual_revenue || '-'}</td>
-                    <td><span class="status-badge ${displayStatus}">${displayStatusText}</span></td>
+                    <td>
+                        <div class="status-with-time">
+                            <span class="status-badge ${displayStatus}">${statusInfo.text}</span>
+                            ${statusInfo.time ? `<span class="status-time">${statusInfo.time}</span>` : ''}
+                        </div>
+                    </td>
                     <td>${formatDate(app.created_at)}</td>
                     <td>
                         <div class="kebab-menu">
@@ -403,8 +430,15 @@ async function loadApplications() {
 }
 
 async function viewApplication(id) {
+    closeAllKebabMenus();
     try {
-        const app = await fetchAPI(`/applications/${id}`);
+        const [app, notes] = await Promise.all([
+            fetchAPI(`/applications/${id}`),
+            loadNotes(id)
+        ]);
+
+        const statusInfo = formatDisplayStatus(app.display_status || 'new', app.status_timestamp);
+
         openModal('Typeform Application - All 15 Questions', `
             <h4 style="color: var(--orange); margin-bottom: 12px; border-bottom: 1px solid var(--border); padding-bottom: 8px;">Contact Info (Q1-Q5)</h4>
             <div class="detail-row">
@@ -474,13 +508,23 @@ async function viewApplication(id) {
 
             <h4 style="color: var(--text-secondary); margin: 16px 0 12px 0; border-bottom: 1px solid var(--border); padding-bottom: 8px;">Status</h4>
             <div class="detail-row">
-                <span class="detail-label">Application Status</span>
-                <span class="detail-value"><span class="status-badge ${app.status}">${app.status}</span></span>
+                <span class="detail-label">Progress Status</span>
+                <span class="detail-value">
+                    <span class="status-badge ${app.display_status || 'new'}">${statusInfo.text}</span>
+                    ${statusInfo.time ? `<span style="margin-left: 8px; color: var(--gray-500); font-size: 0.8rem;">${statusInfo.time}</span>` : ''}
+                </span>
             </div>
             <div class="detail-row">
                 <span class="detail-label">Applied</span>
                 <span class="detail-value">${formatDate(app.created_at)}</span>
             </div>
+            ${app.emailed_at ? `<div class="detail-row"><span class="detail-label">Emailed</span><span class="detail-value">${formatDate(app.emailed_at)}</span></div>` : ''}
+            ${app.replied_at ? `<div class="detail-row"><span class="detail-label">Replied</span><span class="detail-value">${formatDate(app.replied_at)}</span></div>` : ''}
+            ${app.call_booked_at ? `<div class="detail-row"><span class="detail-label">Call Booked</span><span class="detail-value">${formatDate(app.call_booked_at)}</span></div>` : ''}
+            ${app.onboarding_started_at ? `<div class="detail-row"><span class="detail-label">Onboarding Started</span><span class="detail-value">${formatDate(app.onboarding_started_at)}</span></div>` : ''}
+            ${app.onboarding_completed_at ? `<div class="detail-row"><span class="detail-label">Onboarding Complete</span><span class="detail-value">${formatDate(app.onboarding_completed_at)}</span></div>` : ''}
+
+            ${renderNotesSection(notes, id)}
         `);
     } catch (error) {
         showToast('Failed to load application details', 'error');
@@ -1245,6 +1289,125 @@ function formatLinks(text) {
     return text.replace(urlRegex, '<a href="$1" target="_blank">$1</a>');
 }
 
+// Format display status with timestamp
+function formatDisplayStatus(status, timestamp) {
+    const statusLabels = {
+        'new': 'New',
+        'emailed': 'Emailed',
+        'replied': 'Replied',
+        'call_booked': 'Call Booked',
+        'onboarding_started': 'Onboarding Started',
+        'onboarding_complete': 'Onboarding Complete'
+    };
+
+    const text = statusLabels[status] || status.replace(/_/g, ' ');
+    let time = '';
+
+    if (timestamp && status !== 'new') {
+        const date = new Date(timestamp);
+        time = date.toLocaleDateString('en-US', {
+            month: 'short',
+            day: 'numeric'
+        }) + ' @ ' + date.toLocaleTimeString('en-US', {
+            hour: 'numeric',
+            minute: '2-digit'
+        });
+    }
+
+    return { text, time };
+}
+
+// Load notes for an application
+async function loadNotes(applicationId) {
+    try {
+        const notes = await fetchAPI(`/notes/${applicationId}`);
+        return notes;
+    } catch (error) {
+        console.error('Error loading notes:', error);
+        return [];
+    }
+}
+
+// Add a note to an application
+async function addNote(applicationId, noteText) {
+    try {
+        const note = await fetchAPI(`/notes/${applicationId}`, {
+            method: 'POST',
+            body: JSON.stringify({ note_text: noteText })
+        });
+        showToast('Note added', 'success');
+        return note;
+    } catch (error) {
+        showToast('Failed to add note', 'error');
+        throw error;
+    }
+}
+
+// Delete a note
+async function deleteNote(noteId) {
+    try {
+        await fetchAPI(`/notes/${noteId}`, { method: 'DELETE' });
+        showToast('Note deleted', 'success');
+    } catch (error) {
+        showToast('Failed to delete note', 'error');
+        throw error;
+    }
+}
+
+// Render notes section HTML
+function renderNotesSection(notes, applicationId) {
+    const notesList = notes.length > 0
+        ? notes.map(note => `
+            <div class="note-item" data-note-id="${note.id}">
+                <div class="note-meta">
+                    <span class="note-author">${note.created_by}</span>
+                    <span>${formatTimeAgo(note.created_at)} ${note.slack_synced ? '<span class="slack-synced">Synced to Slack</span>' : ''}</span>
+                </div>
+                <div class="note-text">${escapeHtml(note.note_text)}</div>
+            </div>
+        `).join('')
+        : '<p style="color: var(--gray-400); font-size: 0.9rem;">No notes yet</p>';
+
+    return `
+        <div class="notes-section">
+            <h4>Notes</h4>
+            <div class="notes-list">
+                ${notesList}
+            </div>
+            <div class="add-note-form">
+                <textarea id="new-note-text" placeholder="Add a note..."></textarea>
+                <button class="btn btn-primary btn-sm" onclick="submitNote('${applicationId}')">Add Note</button>
+            </div>
+        </div>
+    `;
+}
+
+// Submit a new note
+async function submitNote(applicationId) {
+    const textarea = document.getElementById('new-note-text');
+    const noteText = textarea.value.trim();
+
+    if (!noteText) {
+        showToast('Please enter a note', 'error');
+        return;
+    }
+
+    try {
+        await addNote(applicationId, noteText);
+        // Reload the application view to show the new note
+        viewApplication(applicationId);
+    } catch (error) {
+        // Error already shown
+    }
+}
+
+// Escape HTML to prevent XSS
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
 function refreshStats() {
     loadOverview();
     showToast('Dashboard refreshed', 'success');
@@ -1317,3 +1480,4 @@ window.deleteSubmission = deleteSubmission;
 window.deleteMember = deleteMember;
 window.deleteTeamMember = deleteTeamMember;
 window.deleteApplication = deleteApplication;
+window.submitNote = submitNote;

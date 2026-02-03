@@ -655,8 +655,44 @@ router.post('/save-progress', async (req, res) => {
       `, [session]);
       console.log(`[Onboarding] Scheduled Monday sync for 10 minutes from now (session: ${session})`);
 
+      // Update typeform_applications.onboarding_completed_at if email matches
+      if (answers.email) {
+        await pool.query(`
+          UPDATE typeform_applications
+          SET onboarding_completed_at = CURRENT_TIMESTAMP
+          WHERE LOWER(email) = LOWER($1) AND onboarding_completed_at IS NULL
+        `, [answers.email]);
+        console.log(`[Onboarding] Set onboarding_completed_at for ${answers.email}`);
+
+        // Log activity
+        await pool.query(`
+          INSERT INTO activity_log (action, entity_type, entity_id, details)
+          SELECT 'onboarding_completed', 'typeform_application', id, $2::jsonb
+          FROM typeform_applications
+          WHERE LOWER(email) = LOWER($1)
+          LIMIT 1
+        `, [answers.email, JSON.stringify({ email: answers.email, business_name: answers.businessName })]);
+      }
+
       // Note: Circle/ActiveCampaign sync now happens when questions are answered,
       // not at completion. The APIs handle duplicates gracefully.
+    } else if (answers.email && !previousData?.answers?.email) {
+      // First time email is submitted - set onboarding_started_at
+      await pool.query(`
+        UPDATE typeform_applications
+        SET onboarding_started_at = CURRENT_TIMESTAMP
+        WHERE LOWER(email) = LOWER($1) AND onboarding_started_at IS NULL
+      `, [answers.email]);
+      console.log(`[Onboarding] Set onboarding_started_at for ${answers.email}`);
+
+      // Log activity
+      await pool.query(`
+        INSERT INTO activity_log (action, entity_type, entity_id, details)
+        SELECT 'onboarding_started', 'typeform_application', id, $2::jsonb
+        FROM typeform_applications
+        WHERE LOWER(email) = LOWER($1)
+        LIMIT 1
+      `, [answers.email, JSON.stringify({ email: answers.email })]);
     }
 
     res.json({

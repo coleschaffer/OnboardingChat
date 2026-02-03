@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
+const slackBlocks = require('../lib/slack-blocks');
+const { openModal, postEphemeral } = require('./slack-threads');
 
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
@@ -359,6 +361,164 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
                 });
                 return res.status(200).send();
             }
+
+            // Handle "Send Reply" button click - open modal
+            if (action.action_id === 'open_send_message_modal') {
+                const actionData = JSON.parse(action.value);
+                const modal = slackBlocks.createSendMessageModal(
+                    actionData.recipientName,
+                    actionData.recipientEmail,
+                    actionData.threadId,
+                    actionData.applicationId
+                );
+                await openModal(triggerId, modal);
+                return res.status(200).send();
+            }
+
+            // Handle "Undo" button click - cancel pending email
+            if (action.action_id === 'undo_pending_email') {
+                const pendingEmailId = action.value;
+                const pool = req.app.locals.pool;
+
+                // Cancel the pending email
+                const result = await pool.query(`
+                    UPDATE pending_email_sends
+                    SET status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP
+                    WHERE id = $1 AND status = 'pending'
+                    RETURNING *
+                `, [pendingEmailId]);
+
+                if (result.rows.length > 0) {
+                    const pending = result.rows[0];
+
+                    // Reopen the modal with the previous text
+                    const modal = slackBlocks.createSendMessageModal(
+                        '', // We'll need to get name from application
+                        pending.to_email,
+                        pending.gmail_thread_id,
+                        pending.typeform_application_id,
+                        pending.body // Previous text
+                    );
+                    await openModal(triggerId, modal);
+                }
+                return res.status(200).send();
+            }
+
+            // Handle "Copy WhatsApp Template" button
+            if (action.action_id === 'copy_whatsapp_template') {
+                const data = JSON.parse(action.value);
+                // Open modal with copyable text
+                await fetch('https://slack.com/api/views.open', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${SLACK_BOT_TOKEN}`
+                    },
+                    body: JSON.stringify({
+                        trigger_id: triggerId,
+                        view: {
+                            type: 'modal',
+                            title: {
+                                type: 'plain_text',
+                                text: 'Copy WhatsApp Message'
+                            },
+                            close: {
+                                type: 'plain_text',
+                                text: 'Close'
+                            },
+                            blocks: [
+                                {
+                                    type: 'section',
+                                    text: {
+                                        type: 'mrkdwn',
+                                        text: '*Select all and copy the message below:*'
+                                    }
+                                },
+                                {
+                                    type: 'input',
+                                    element: {
+                                        type: 'plain_text_input',
+                                        multiline: true,
+                                        initial_value: data.message,
+                                        action_id: 'copy_text'
+                                    },
+                                    label: {
+                                        type: 'plain_text',
+                                        text: 'WhatsApp Message'
+                                    }
+                                }
+                            ]
+                        }
+                    })
+                });
+                return res.status(200).send();
+            }
+        }
+
+        // Handle modal submissions
+        if (payload.type === 'view_submission' && payload.view.callback_id === 'send_email_modal') {
+            const pool = req.app.locals.pool;
+            const privateMetadata = JSON.parse(payload.view.private_metadata);
+            const messageText = payload.view.state.values.message_block.message_input.value;
+            const userId = payload.user.id;
+
+            // Insert pending email with 30-second delay
+            const sendAt = new Date(Date.now() + 30000); // 30 seconds from now
+
+            const result = await pool.query(`
+                INSERT INTO pending_email_sends (
+                    to_email, subject, body, gmail_thread_id, typeform_application_id,
+                    user_id, channel_id, thread_ts, send_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                RETURNING id
+            `, [
+                privateMetadata.recipientEmail,
+                'Re: Thanks for applying to CA Pro',
+                messageText,
+                privateMetadata.threadId,
+                privateMetadata.applicationId,
+                userId,
+                payload.view.app_id ? '' : '', // We'll get channel from application
+                null, // thread_ts
+                sendAt
+            ]);
+
+            const pendingEmailId = result.rows[0].id;
+
+            // Get the application's slack thread info for the ephemeral message
+            const appResult = await pool.query(
+                'SELECT slack_channel_id, slack_thread_ts FROM typeform_applications WHERE id = $1',
+                [privateMetadata.applicationId]
+            );
+
+            if (appResult.rows[0]?.slack_channel_id) {
+                const channelId = appResult.rows[0].slack_channel_id;
+                const threadTs = appResult.rows[0].slack_thread_ts;
+
+                // Update the pending email with channel info
+                await pool.query(
+                    'UPDATE pending_email_sends SET channel_id = $1, thread_ts = $2 WHERE id = $3',
+                    [channelId, threadTs, pendingEmailId]
+                );
+
+                // Send ephemeral "Sending..." message with Undo button
+                const ephemeralBlock = slackBlocks.createSendingEphemeralBlock(
+                    privateMetadata.recipientEmail,
+                    sendAt.toISOString(),
+                    pendingEmailId
+                );
+
+                await postEphemeral(
+                    channelId,
+                    userId,
+                    ephemeralBlock.text,
+                    ephemeralBlock.blocks,
+                    threadTs
+                );
+            }
+
+            // Return empty response to close modal
+            return res.status(200).send();
         }
 
         // Handle message events (for edit thread replies)
