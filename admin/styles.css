@@ -1050,3 +1050,81 @@ body {
         grid-template-columns: 1fr;
     }
 }
+
+/* Password Gate */
+.password-gate {
+    position: fixed;
+    inset: 0;
+    background: var(--bg-color);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+}
+
+.password-modal {
+    background: var(--white);
+    border-radius: 16px;
+    padding: 40px;
+    box-shadow: var(--shadow-lg);
+    text-align: center;
+    max-width: 400px;
+    width: 90%;
+}
+
+.password-header {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    margin-bottom: 24px;
+}
+
+.password-header h1 {
+    font-family: 'Montserrat', sans-serif;
+    font-size: 1.75rem;
+    font-weight: 700;
+    color: var(--gray-800);
+}
+
+.password-modal > p {
+    color: var(--gray-500);
+    margin-bottom: 24px;
+    font-size: 0.95rem;
+}
+
+#password-form {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+#password-input {
+    padding: 14px 16px;
+    border: 1px solid var(--gray-300);
+    border-radius: 8px;
+    font-size: 1rem;
+    font-family: inherit;
+    text-align: center;
+    letter-spacing: 4px;
+}
+
+#password-input:focus {
+    outline: none;
+    border-color: var(--primary-orange);
+    box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.1);
+}
+
+#password-form .btn {
+    width: 100%;
+    justify-content: center;
+    padding: 14px;
+    font-size: 1rem;
+}
+
+.password-error {
+    color: var(--red);
+    font-size: 0.9rem;
+    margin-top: 12px;
+    min-height: 20px;
+}

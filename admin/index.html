@@ -11,7 +11,23 @@
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <div class="app">
+    <!-- Password Gate -->
+    <div class="password-gate" id="password-gate">
+        <div class="password-modal">
+            <div class="password-header">
+                <h1>CA Pro</h1>
+                <span class="badge">Admin</span>
+            </div>
+            <p>Enter password to access the admin dashboard</p>
+            <form id="password-form">
+                <input type="password" id="password-input" placeholder="Password" autocomplete="off" autofocus>
+                <button type="submit" class="btn btn-primary">Enter</button>
+            </form>
+            <p class="password-error" id="password-error"></p>
+        </div>
+    </div>
+
+    <div class="app" id="app" style="display: none;">
         <!-- Sidebar -->
         <aside class="sidebar">
             <div class="sidebar-header">

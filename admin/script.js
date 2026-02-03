@@ -1,6 +1,7 @@
 // CA Pro Admin Dashboard
 
 const API_BASE = '/api';
+const ADMIN_PASSWORD = '2323';
 
 // State
 let currentTab = 'overview';
@@ -9,13 +10,56 @@ let membersPage = 0;
 let teamMembersPage = 0;
 const pageSize = 20;
 
-// Initialize
-document.addEventListener('DOMContentLoaded', () => {
+// Password Gate
+function checkAuth() {
+    return sessionStorage.getItem('admin_authenticated') === 'true';
+}
+
+function setupPasswordGate() {
+    const passwordGate = document.getElementById('password-gate');
+    const app = document.getElementById('app');
+    const passwordForm = document.getElementById('password-form');
+    const passwordInput = document.getElementById('password-input');
+    const passwordError = document.getElementById('password-error');
+
+    if (checkAuth()) {
+        passwordGate.style.display = 'none';
+        app.style.display = 'flex';
+        return true;
+    }
+
+    passwordForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const enteredPassword = passwordInput.value;
+
+        if (enteredPassword === ADMIN_PASSWORD) {
+            sessionStorage.setItem('admin_authenticated', 'true');
+            passwordGate.style.display = 'none';
+            app.style.display = 'flex';
+            initializeDashboard();
+        } else {
+            passwordError.textContent = 'Incorrect password';
+            passwordInput.value = '';
+            passwordInput.focus();
+        }
+    });
+
+    return false;
+}
+
+function initializeDashboard() {
     setupNavigation();
     setupSearch();
     setupFilters();
     setupImport();
     loadOverview();
+}
+
+// Initialize
+document.addEventListener('DOMContentLoaded', () => {
+    if (setupPasswordGate()) {
+        initializeDashboard();
+    }
 });
 
 // Navigation
