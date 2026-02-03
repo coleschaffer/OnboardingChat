@@ -243,6 +243,19 @@ router.delete('/:id', async (req, res) => {
     const pool = req.app.locals.pool;
     const { id } = req.params;
 
+    // First delete related email_threads (foreign key constraint)
+    await pool.query(
+      'DELETE FROM email_threads WHERE typeform_application_id = $1',
+      [id]
+    );
+
+    // Also delete related application_notes
+    await pool.query(
+      'DELETE FROM application_notes WHERE application_id = $1',
+      [id]
+    );
+
+    // Now delete the application
     const result = await pool.query(
       'DELETE FROM typeform_applications WHERE id = $1 RETURNING *',
       [id]
@@ -252,6 +265,7 @@ router.delete('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Application not found' });
     }
 
+    console.log(`[Admin] Deleted application ${id} (${result.rows[0].email})`);
     res.json({ message: 'Application deleted successfully' });
   } catch (error) {
     console.error('Error deleting application:', error);
