@@ -28,6 +28,42 @@ let applicationsSort = (() => {
     }
 })();
 
+// Monday-style board state (members)
+let membersLastResponse = null;
+let membersTableUXInitialized = false;
+let membersGroupCollapsed = (() => {
+    try {
+        return JSON.parse(localStorage.getItem('admin.members.groupCollapsed') || '{}') || {};
+    } catch {
+        return {};
+    }
+})();
+let membersSort = (() => {
+    try {
+        return JSON.parse(localStorage.getItem('admin.members.sort') || 'null') || { key: 'created_at', dir: 'desc' };
+    } catch {
+        return { key: 'created_at', dir: 'desc' };
+    }
+})();
+
+// Monday-style board state (team members)
+let teamMembersLastResponse = null;
+let teamMembersTableUXInitialized = false;
+let teamMembersGroupCollapsed = (() => {
+    try {
+        return JSON.parse(localStorage.getItem('admin.teamMembers.groupCollapsed') || '{}') || {};
+    } catch {
+        return {};
+    }
+})();
+let teamMembersSort = (() => {
+    try {
+        return JSON.parse(localStorage.getItem('admin.teamMembers.sort') || 'null') || { key: 'created_at', dir: 'desc' };
+    } catch {
+        return { key: 'created_at', dir: 'desc' };
+    }
+})();
+
 // Password Gate
 function checkAuth() {
     return sessionStorage.getItem('admin_authenticated') === 'true';
@@ -897,45 +933,185 @@ async function convertApplication(id) {
     }
 }
 
-// Members
-async function loadMembers() {
-    const tbody = document.getElementById('members-tbody');
-    tbody.innerHTML = '<tr><td colspan="7" class="loading">Loading...</td></tr>';
+// Members board helpers
+function getMembersStatusOrder() {
+    return ['pending', 'in_progress', 'completed'];
+}
 
-    try {
-        enableTableColumnResizing('members-table', 'admin.members.colWidths');
+function getMemberStatusLabel(statusKey) {
+    if (statusKey === 'in_progress') return 'In Progress';
+    if (statusKey === 'completed') return 'Completed';
+    return 'Pending';
+}
 
-        const search = document.getElementById('members-search')?.value || '';
-        const source = document.getElementById('members-source-filter')?.value || '';
-        const status = document.getElementById('members-status-filter')?.value || '';
+function compareMembers(a, b) {
+    const { key, dir } = membersSort || { key: 'created_at', dir: 'desc' };
+    const direction = dir === 'asc' ? 1 : -1;
 
-        const params = new URLSearchParams({
-            limit: pageSize,
-            offset: membersPage * pageSize
+    const value = (m) => {
+        switch (key) {
+            case 'name':
+                return `${m.first_name || ''} ${m.last_name || ''}`.trim().toLowerCase();
+            case 'business':
+                return (m.business_name || '').toLowerCase();
+            case 'email':
+                return (m.email || '').toLowerCase();
+            case 'revenue':
+                return (m.annual_revenue || '').toLowerCase();
+            case 'team':
+                return Number(m.team_member_count || 0);
+            case 'created_at':
+            default:
+                return new Date(m.created_at || 0).getTime();
+        }
+    };
+
+    const av = value(a);
+    const bv = value(b);
+    if (av < bv) return -1 * direction;
+    if (av > bv) return 1 * direction;
+    return 0;
+}
+
+function updateMembersSortIndicators() {
+    const table = document.getElementById('members-table');
+    if (!table) return;
+
+    const ths = Array.from(table.querySelectorAll('thead th'));
+    ths.forEach(th => th.classList.remove('sorted', 'asc', 'desc'));
+
+    const keyToIndex = {
+        name: 0,
+        business: 1,
+        email: 2,
+        revenue: 3,
+        team: 4,
+        created_at: null
+    };
+
+    const index = keyToIndex[membersSort?.key];
+    if (index == null || !ths[index]) return;
+    ths[index].classList.add('sorted', membersSort.dir === 'asc' ? 'asc' : 'desc');
+}
+
+function setMembersSort(nextKey) {
+    if (!nextKey) return;
+
+    if (membersSort.key === nextKey) {
+        membersSort.dir = membersSort.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+        membersSort.key = nextKey;
+        membersSort.dir = nextKey === 'team' ? 'desc' : (nextKey === 'created_at' ? 'desc' : 'asc');
+    }
+
+    localStorage.setItem('admin.members.sort', JSON.stringify(membersSort));
+    updateMembersSortIndicators();
+    renderMembersTable();
+}
+
+function toggleMembersGroup(statusKey) {
+    membersGroupCollapsed[statusKey] = !membersGroupCollapsed[statusKey];
+    localStorage.setItem('admin.members.groupCollapsed', JSON.stringify(membersGroupCollapsed));
+    renderMembersTable();
+}
+
+function initMembersTableUX() {
+    if (membersTableUXInitialized) return;
+    membersTableUXInitialized = true;
+
+    enableTableColumnResizing('members-table', 'admin.members.colWidths');
+
+    const table = document.getElementById('members-table');
+    if (!table) return;
+
+    const ths = Array.from(table.querySelectorAll('thead th'));
+    const sortableByIndex = new Map([
+        [0, 'name'],
+        [1, 'business'],
+        [2, 'email'],
+        [3, 'revenue'],
+        [4, 'team']
+    ]);
+
+    ths.forEach((th, index) => {
+        const sortKey = sortableByIndex.get(index);
+        if (!sortKey) return;
+
+        th.classList.add('sortable');
+        th.addEventListener('click', (e) => {
+            if (e.target.closest('.col-resizer')) return;
+            setMembersSort(sortKey);
         });
-        if (search) params.append('search', search);
-        if (source) params.append('source', source);
-        if (status) params.append('status', status);
+    });
 
-        const data = await fetchAPI(`/members?${params}`);
+    updateMembersSortIndicators();
+}
 
-        if (data.members.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="7" class="loading">No members found</td></tr>';
-        } else {
-            tbody.innerHTML = data.members.map(member => `
+function renderMembersTable() {
+    const tbody = document.getElementById('members-tbody');
+    if (!tbody) return;
+    if (!membersLastResponse) return;
+
+    const members = membersLastResponse.members || [];
+    if (members.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" class="loading">No members found</td></tr>';
+        return;
+    }
+
+    const groups = members.reduce((acc, m) => {
+        const status = m.onboarding_status || 'pending';
+        (acc[status] ||= []).push(m);
+        return acc;
+    }, {});
+
+    const ordered = getMembersStatusOrder();
+    const unknown = Object.keys(groups).filter(k => !ordered.includes(k)).sort();
+    const statusesToRender = [...ordered, ...unknown].filter(k => (groups[k] || []).length > 0);
+
+    const rows = [];
+
+    for (const statusKey of statusesToRender) {
+        const groupMembers = groups[statusKey] || [];
+        const collapsed = !!membersGroupCollapsed[statusKey];
+
+        rows.push(`
+            <tr class="group-header-row">
+                <td colspan="7">
+                    <div class="group-row">
+                        <button class="group-toggle" type="button" onclick="toggleMembersGroup('${statusKey}')">${collapsed ? '▸' : '▾'}</button>
+                        <span class="group-color ${statusKey}"></span>
+                        <span>${escapeHtml(getMemberStatusLabel(statusKey))}</span>
+                        <span class="group-count">${groupMembers.length}</span>
+                    </div>
+                </td>
+            </tr>
+        `);
+
+        if (collapsed) continue;
+
+        const sorted = [...groupMembers].sort(compareMembers);
+        rows.push(sorted.map(member => {
+            const name = `${member.first_name || ''} ${member.last_name || ''}`.trim() || '-';
+            const business = member.business_name || '-';
+            const email = member.email || '-';
+            const revenue = member.annual_revenue || '-';
+            const teamCount = Number(member.team_member_count || 0);
+            const status = member.onboarding_status || 'pending';
+
+            return `
                 <tr class="clickable-row" onclick="viewMember('${member.id}')">
-                    <td><strong>${member.first_name || ''} ${member.last_name || ''}</strong></td>
-                    <td>${member.business_name || '-'}</td>
-                    <td>${member.email || '-'}</td>
-                    <td>${member.annual_revenue || '-'}</td>
-                    <td>${member.team_member_count || 0}</td>
+                    <td><strong>${escapeHtml(name)}</strong></td>
+                    <td>${escapeHtml(business)}</td>
+                    <td>${escapeHtml(email)}</td>
+                    <td>${escapeHtml(revenue)}</td>
+                    <td>${teamCount}</td>
                     <td>
-                        <select class="inline-status-select member-status ${member.onboarding_status || 'pending'}"
+                        <select class="inline-status-select member-status ${status}"
                                 onclick="event.stopPropagation()"
                                 onchange="event.stopPropagation(); this.className = 'inline-status-select member-status ' + this.value; updateMemberOnboardingStatus('${member.id}', this.value)">
-                            <option value="pending" ${member.onboarding_status === 'pending' ? 'selected' : ''}>Pending</option>
-                            <option value="in_progress" ${member.onboarding_status === 'in_progress' ? 'selected' : ''}>In Progress</option>
-                            <option value="completed" ${member.onboarding_status === 'completed' ? 'selected' : ''}>Completed</option>
+                            <option value="pending" ${status === 'pending' ? 'selected' : ''}>Pending</option>
+                            <option value="in_progress" ${status === 'in_progress' ? 'selected' : ''}>In Progress</option>
+                            <option value="completed" ${status === 'completed' ? 'selected' : ''}>Completed</option>
                         </select>
                     </td>
                     <td>
@@ -966,9 +1142,36 @@ async function loadMembers() {
                         </div>
                     </td>
                 </tr>
-            `).join('');
-        }
+            `;
+        }).join(''));
+    }
 
+    tbody.innerHTML = rows.join('');
+}
+
+// Members
+async function loadMembers() {
+    const tbody = document.getElementById('members-tbody');
+    tbody.innerHTML = '<tr><td colspan="7" class="loading">Loading...</td></tr>';
+
+    try {
+        initMembersTableUX();
+
+        const search = document.getElementById('members-search')?.value || '';
+        const source = document.getElementById('members-source-filter')?.value || '';
+        const status = document.getElementById('members-status-filter')?.value || '';
+
+        const params = new URLSearchParams({
+            limit: pageSize,
+            offset: membersPage * pageSize
+        });
+        if (search) params.append('search', search);
+        if (source) params.append('source', source);
+        if (status) params.append('status', status);
+
+        const data = await fetchAPI(`/members?${params}`);
+        membersLastResponse = data;
+        renderMembersTable();
         renderPagination('members', data.total, membersPage);
     } catch (error) {
         console.error('Error loading members:', error);
@@ -1107,33 +1310,189 @@ async function viewMember(id) {
     }
 }
 
-// Team Members
-async function loadTeamMembers() {
-    const tbody = document.getElementById('team-members-tbody');
-    tbody.innerHTML = '<tr><td colspan="6" class="loading">Loading...</td></tr>';
+// Team Members board helpers
+function hashStringToInt(input) {
+    const str = (input || '').toString();
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+        hash = ((hash << 5) - hash) + str.charCodeAt(i);
+        hash |= 0; // 32-bit
+    }
+    return Math.abs(hash);
+}
 
-    try {
-        enableTableColumnResizing('team-members-table', 'admin.teamMembers.colWidths');
+function pickGroupColor(label) {
+    const palette = [
+        '#0073ea', // blue
+        '#00c875', // green
+        '#ffcb00', // yellow
+        '#e2445c', // red
+        '#a25ddc', // purple
+        '#00a9ff', // light blue
+        '#ff642e', // orange
+        '#579bfc'  // azure
+    ];
+    const idx = hashStringToInt(label) % palette.length;
+    return palette[idx];
+}
 
-        const search = document.getElementById('team-members-search')?.value || '';
+function compareTeamMembers(a, b) {
+    const { key, dir } = teamMembersSort || { key: 'created_at', dir: 'desc' };
+    const direction = dir === 'asc' ? 1 : -1;
 
-        const params = new URLSearchParams({
-            limit: pageSize,
-            offset: teamMembersPage * pageSize
+    const value = (tm) => {
+        switch (key) {
+            case 'name':
+                return `${tm.first_name || ''} ${tm.last_name || ''}`.trim().toLowerCase();
+            case 'email':
+                return (tm.email || '').toLowerCase();
+            case 'role':
+                return (tm.role || tm.title || '').toLowerCase();
+            case 'company':
+                return (tm.business_name || '').toLowerCase();
+            case 'created_at':
+            default:
+                return new Date(tm.created_at || 0).getTime();
+        }
+    };
+
+    const av = value(a);
+    const bv = value(b);
+    if (av < bv) return -1 * direction;
+    if (av > bv) return 1 * direction;
+    return 0;
+}
+
+function updateTeamMembersSortIndicators() {
+    const table = document.getElementById('team-members-table');
+    if (!table) return;
+
+    const ths = Array.from(table.querySelectorAll('thead th'));
+    ths.forEach(th => th.classList.remove('sorted', 'asc', 'desc'));
+
+    const keyToIndex = {
+        name: 0,
+        email: 1,
+        role: 2,
+        company: 3,
+        created_at: null
+    };
+
+    const index = keyToIndex[teamMembersSort?.key];
+    if (index == null || !ths[index]) return;
+    ths[index].classList.add('sorted', teamMembersSort.dir === 'asc' ? 'asc' : 'desc');
+}
+
+function setTeamMembersSort(nextKey) {
+    if (!nextKey) return;
+
+    if (teamMembersSort.key === nextKey) {
+        teamMembersSort.dir = teamMembersSort.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+        teamMembersSort.key = nextKey;
+        teamMembersSort.dir = nextKey === 'created_at' ? 'desc' : 'asc';
+    }
+
+    localStorage.setItem('admin.teamMembers.sort', JSON.stringify(teamMembersSort));
+    updateTeamMembersSortIndicators();
+    renderTeamMembersTable();
+}
+
+function toggleTeamMembersGroup(encodedGroupKey) {
+    const groupKey = decodeURIComponent(encodedGroupKey || '');
+    teamMembersGroupCollapsed[groupKey] = !teamMembersGroupCollapsed[groupKey];
+    localStorage.setItem('admin.teamMembers.groupCollapsed', JSON.stringify(teamMembersGroupCollapsed));
+    renderTeamMembersTable();
+}
+
+function initTeamMembersTableUX() {
+    if (teamMembersTableUXInitialized) return;
+    teamMembersTableUXInitialized = true;
+
+    enableTableColumnResizing('team-members-table', 'admin.teamMembers.colWidths');
+
+    const table = document.getElementById('team-members-table');
+    if (!table) return;
+
+    const ths = Array.from(table.querySelectorAll('thead th'));
+    const sortableByIndex = new Map([
+        [0, 'name'],
+        [1, 'email'],
+        [2, 'role'],
+        [3, 'company']
+    ]);
+
+    ths.forEach((th, index) => {
+        const sortKey = sortableByIndex.get(index);
+        if (!sortKey) return;
+
+        th.classList.add('sortable');
+        th.addEventListener('click', (e) => {
+            if (e.target.closest('.col-resizer')) return;
+            setTeamMembersSort(sortKey);
         });
-        if (search) params.append('search', search);
+    });
 
-        const data = await fetchAPI(`/team-members?${params}`);
+    updateTeamMembersSortIndicators();
+}
 
-        if (data.team_members.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="6" class="loading">No team members found</td></tr>';
-        } else {
-            tbody.innerHTML = data.team_members.map(tm => `
+function renderTeamMembersTable() {
+    const tbody = document.getElementById('team-members-tbody');
+    if (!tbody) return;
+    if (!teamMembersLastResponse) return;
+
+    const members = teamMembersLastResponse.team_members || [];
+    if (members.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="loading">No team members found</td></tr>';
+        return;
+    }
+
+    const groups = members.reduce((acc, tm) => {
+        const company = (tm.business_name || '').trim() || 'No Company';
+        (acc[company] ||= []).push(tm);
+        return acc;
+    }, {});
+
+    const groupNames = Object.keys(groups).sort((a, b) => {
+        if (a === 'No Company') return -1;
+        if (b === 'No Company') return 1;
+        return a.localeCompare(b);
+    });
+
+    const rows = [];
+
+    for (const company of groupNames) {
+        const groupMembers = groups[company] || [];
+        const collapsed = !!teamMembersGroupCollapsed[company];
+        const color = pickGroupColor(company);
+
+        rows.push(`
+            <tr class="group-header-row">
+                <td colspan="6">
+                    <div class="group-row">
+                        <button class="group-toggle" type="button" onclick="toggleTeamMembersGroup('${encodeURIComponent(company)}')">${collapsed ? '▸' : '▾'}</button>
+                        <span class="group-color" style="background: ${color};"></span>
+                        <span>${escapeHtml(company)}</span>
+                        <span class="group-count">${groupMembers.length}</span>
+                    </div>
+                </td>
+            </tr>
+        `);
+
+        if (collapsed) continue;
+
+        const sorted = [...groupMembers].sort(compareTeamMembers);
+        rows.push(sorted.map(tm => {
+            const name = `${tm.first_name || ''} ${tm.last_name || ''}`.trim() || '-';
+            const role = tm.role || tm.title || '-';
+            const companyName = tm.business_name || '-';
+
+            return `
                 <tr class="clickable-row" onclick="viewTeamMember('${tm.id}')">
-                    <td><strong>${tm.first_name || ''} ${tm.last_name || ''}</strong></td>
-                    <td>${tm.email || '-'}</td>
-                    <td>${tm.role || tm.title || '-'}</td>
-                    <td>${tm.business_name || '-'}</td>
+                    <td><strong>${escapeHtml(name)}</strong></td>
+                    <td>${escapeHtml(tm.email || '-')}</td>
+                    <td>${escapeHtml(role)}</td>
+                    <td>${escapeHtml(companyName)}</td>
                     <td>
                         <div class="skills-display">
                             ${tm.copywriting_skill ? `<span class="skill-badge">Copy: ${tm.copywriting_skill}</span>` : ''}
@@ -1169,10 +1528,33 @@ async function loadTeamMembers() {
                         </div>
                     </td>
                 </tr>
-            `).join('');
-        }
+            `;
+        }).join(''));
+    }
 
-        renderPagination('team-members', data.total, teamMembersPage);
+    tbody.innerHTML = rows.join('');
+}
+
+// Team Members
+async function loadTeamMembers() {
+    const tbody = document.getElementById('team-members-tbody');
+    tbody.innerHTML = '<tr><td colspan="6" class="loading">Loading...</td></tr>';
+
+    try {
+        initTeamMembersTableUX();
+
+        const search = document.getElementById('team-members-search')?.value || '';
+
+        const params = new URLSearchParams({
+            limit: pageSize,
+            offset: teamMembersPage * pageSize
+        });
+        if (search) params.append('search', search);
+
+        const data = await fetchAPI(`/team-members?${params}`);
+        teamMembersLastResponse = data;
+        renderTeamMembersTable();
+        renderPagination('team-members', Number(data.total || 0), teamMembersPage);
     } catch (error) {
         console.error('Error loading team members:', error);
         tbody.innerHTML = '<tr><td colspan="6" class="loading">Error loading team members</td></tr>';
@@ -1941,6 +2323,8 @@ window.setActivePanelTab = setActivePanelTab;
 window.refreshStats = refreshStats;
 window.toggleKebabMenu = toggleKebabMenu;
 window.toggleApplicationsGroup = toggleApplicationsGroup;
+window.toggleMembersGroup = toggleMembersGroup;
+window.toggleTeamMembersGroup = toggleTeamMembersGroup;
 window.markSubmissionComplete = markSubmissionComplete;
 window.deleteSubmission = deleteSubmission;
 window.deleteMember = deleteMember;

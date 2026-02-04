@@ -125,6 +125,12 @@ Auth is via `x-cron-secret: CRON_SECRET`.
 - `admin/index.html`: dashboard UI
 - `admin/script.js`: client-side password gate + calls admin APIs
   - Security note: password is hardcoded and stored in sessionStorage; treat this as unprotected without external auth.
+  - Monday-style “board” UX (tables) implemented client-side:
+    - Grouped rows (collapsible headers) for Applications / Members / Team Members
+    - Sortable columns (state persisted in `localStorage`)
+    - Resizable columns (state persisted in `localStorage`)
+    - Right-side item view panel (replaces modals): `openItemPanel()`; legacy `openModal()` routes into the panel
+- `admin/styles.css`: dashboard styles (palette + board/panel UI)
 
 ## Database (`db/`)
 

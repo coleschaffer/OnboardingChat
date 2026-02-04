@@ -622,6 +622,9 @@ body {
 .group-color.onboarding_started { background: rgba(160, 167, 181, 0.9); }
 .group-color.onboarding_complete { background: rgba(0, 200, 117, 0.85); }
 .group-color.joined { background: rgba(0, 200, 117, 0.85); }
+.group-color.pending { background: rgba(255, 203, 0, 0.75); }
+.group-color.in_progress { background: rgba(0, 115, 234, 0.55); }
+.group-color.completed { background: rgba(0, 200, 117, 0.8); }
 
 .group-count {
     margin-left: 6px;
