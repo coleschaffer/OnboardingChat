@@ -616,6 +616,9 @@ router.post('/save-progress', async (req, res) => {
     const session = sessionId || uuidv4();
     const progress = Math.round((currentQuestion / totalQuestions) * 100);
 
+    // If progress is 100%, treat as complete (prevents race condition)
+    const isActuallyComplete = isComplete || progress >= 100;
+
     // Get the last answered question ID to determine if we need to sync
     const lastQuestionId = answers.lastQuestionId || null;
 
@@ -635,22 +638,36 @@ router.post('/save-progress', async (req, res) => {
       businessOwnerId = existing.rows[0].business_owner_id;
       previousData = existing.rows[0].data;
 
-      await pool.query(`
-        UPDATE onboarding_submissions SET
-          data = $1,
-          progress_percentage = $2,
-          last_question = $3,
-          is_complete = $4,
-          completed_at = $5
-        WHERE session_id = $6
-      `, [
-        JSON.stringify({ answers, teamMembers, cLevelPartners }),
-        progress,
-        lastQuestionId,
-        isComplete || false,
-        isComplete ? new Date() : null,
-        session
-      ]);
+      // Only update is_complete/completed_at if becoming complete (don't overwrite true with false)
+      if (isActuallyComplete) {
+        await pool.query(`
+          UPDATE onboarding_submissions SET
+            data = $1,
+            progress_percentage = $2,
+            last_question = $3,
+            is_complete = true,
+            completed_at = COALESCE(completed_at, NOW())
+          WHERE session_id = $4
+        `, [
+          JSON.stringify({ answers, teamMembers, cLevelPartners }),
+          progress,
+          lastQuestionId,
+          session
+        ]);
+      } else {
+        await pool.query(`
+          UPDATE onboarding_submissions SET
+            data = $1,
+            progress_percentage = $2,
+            last_question = $3
+          WHERE session_id = $4
+        `, [
+          JSON.stringify({ answers, teamMembers, cLevelPartners }),
+          progress,
+          lastQuestionId,
+          session
+        ]);
+      }
     } else {
       // Create new submission
       const result = await pool.query(`
@@ -663,8 +680,8 @@ router.post('/save-progress', async (req, res) => {
         JSON.stringify({ answers, teamMembers, cLevelPartners }),
         progress,
         lastQuestionId,
-        isComplete || false,
-        isComplete ? new Date() : null
+        isActuallyComplete,
+        isActuallyComplete ? new Date() : null
       ]);
       submissionId = result.rows[0].id;
     }
@@ -713,7 +730,7 @@ router.post('/save-progress', async (req, res) => {
     }
 
     // If complete, create/update business owner and team members
-    if (isComplete) {
+    if (isActuallyComplete) {
       businessOwnerId = await createOrUpdateBusinessOwner(pool, answers, teamMembers, cLevelPartners, session, submissionId);
 
       // Send Slack welcome message (async, don't wait)
@@ -786,7 +803,7 @@ router.post('/save-progress', async (req, res) => {
       submissionId,
       businessOwnerId,
       progress,
-      isComplete: isComplete || false
+      isComplete: isActuallyComplete
     });
   } catch (error) {
     console.error('Error saving progress:', error);
