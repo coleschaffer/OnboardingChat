@@ -245,15 +245,19 @@ router.delete('/:id', async (req, res) => {
     const pool = req.app.locals.pool;
     const { id } = req.params;
 
-    // First delete related email_threads (foreign key constraint)
+    // Delete all related records (foreign key constraints)
     await pool.query(
       'DELETE FROM email_threads WHERE typeform_application_id = $1',
       [id]
     );
 
-    // Also delete related application_notes
     await pool.query(
       'DELETE FROM application_notes WHERE application_id = $1',
+      [id]
+    );
+
+    await pool.query(
+      'DELETE FROM pending_email_sends WHERE typeform_application_id = $1',
       [id]
     );
 
