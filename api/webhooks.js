@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { gmailService } = require('../lib/gmail');
 const { postApplicationNotification, createApplicationThread, postMessage } = require('./slack-threads');
 const { createBusinessOwnerItem, businessOwnerExistsInMonday } = require('./monday');
+const { sendWelcomeThread } = require('./jobs');
 
 // Typeform webhook handler
 router.post('/typeform', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -497,20 +498,54 @@ router.post('/samcart', async (req, res) => {
     })]);
 
     console.log(`New SamCart order received: ${result.rows[0].id}`);
+    const orderId = result.rows[0].id;
 
-    // Post notification to #notifications-capro (async - don't block response)
-    postSamCartNotification(pool, result.rows[0].id, orderData).catch(err => {
+    // Post notification to #notifications-capro, then send welcome thread
+    postSamCartNotification(pool, orderId, orderData).then(async (notifResult) => {
+      if (!notifResult) return;
+
+      // Look up Typeform data for this email
+      let typeformData = null;
+      if (orderData.email) {
+        const tfResult = await pool.query(
+          'SELECT * FROM typeform_applications WHERE LOWER(email) = LOWER($1) ORDER BY created_at DESC LIMIT 1',
+          [orderData.email]
+        );
+        typeformData = tfResult.rows[0] || null;
+      }
+
+      // Get the full order with thread info
+      const orderResult = await pool.query('SELECT * FROM samcart_orders WHERE id = $1', [orderId]);
+      const fullOrder = orderResult.rows[0];
+
+      if (fullOrder && fullOrder.slack_thread_ts) {
+        // Send welcome thread immediately
+        try {
+          await sendWelcomeThread(fullOrder, typeformData, pool);
+
+          // Mark welcome_sent = true
+          await pool.query(
+            'UPDATE samcart_orders SET welcome_sent = true, welcome_sent_at = NOW() WHERE id = $1',
+            [orderId]
+          );
+
+          console.log(`[SamCart] Welcome thread sent for ${orderData.email}`);
+        } catch (err) {
+          console.error('[SamCart] Error sending welcome thread:', err);
+        }
+      }
+    }).catch(err => {
       console.error('[SamCart] Error posting Slack notification:', err);
     });
 
     // Create Business Owner in Monday.com (async - don't block response)
-    createBusinessOwnerInMonday(pool, result.rows[0].id, orderData, payload).catch(err => {
+    createBusinessOwnerInMonday(pool, orderId, orderData, payload).catch(err => {
       console.error('[SamCart] Error creating Monday Business Owner:', err);
     });
 
     res.status(200).json({
       success: true,
-      order_id: result.rows[0].id
+      order_id: orderId
     });
   } catch (error) {
     console.error('Error processing SamCart webhook:', error);

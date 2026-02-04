@@ -303,38 +303,38 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
   const threadTs = parentThreadTs || parentResult.ts;
   await new Promise(resolve => setTimeout(resolve, 300));
 
-  // Thread message 1: Typeform Application Data (if available) - All 15 Questions
+  // Thread message 1: Typeform Application Data (if available)
   if (typeformData) {
     const typeformFields = [
       `*--- Contact Info ---*`,
-      `*Q1-2 Name:* ${[typeformData.first_name, typeformData.last_name].filter(Boolean).join(' ') || 'N/A'}`,
-      `*Q3 Email:* ${typeformData.email || 'N/A'}`,
-      `*Q4 Phone:* ${typeformData.phone || 'N/A'}`,
-      `*Q5 Best Way to Reach:* ${typeformData.contact_preference || 'N/A'}`,
+      `*Name:* ${[typeformData.first_name, typeformData.last_name].filter(Boolean).join(' ') || 'N/A'}`,
+      `*Email:* ${typeformData.email || 'N/A'}`,
+      `*Phone:* ${typeformData.phone || 'N/A'}`,
+      `*Best Way to Reach:* ${typeformData.contact_preference || 'N/A'}`,
       ``,
       `*--- Business Info ---*`,
-      `*Q6 Business:* ${typeformData.business_description || 'N/A'}`,
-      `*Q7 Annual Revenue:* ${typeformData.annual_revenue || 'N/A'}`,
-      `*Q8 Revenue Trend:* ${typeformData.revenue_trend || 'N/A'}`,
+      `*Business:* ${typeformData.business_description || 'N/A'}`,
+      `*Annual Revenue:* ${typeformData.annual_revenue || 'N/A'}`,
+      `*Revenue Trend:* ${typeformData.revenue_trend || 'N/A'}`,
       ``,
       `*--- Goals & Challenges ---*`,
-      `*Q9 #1 Challenge:* ${typeformData.main_challenge || 'N/A'}`,
-      `*Q10 Why CA Pro:* ${typeformData.why_ca_pro || 'N/A'}`,
+      `*#1 Challenge:* ${typeformData.main_challenge || 'N/A'}`,
+      `*Why CA Pro:* ${typeformData.why_ca_pro || 'N/A'}`,
       ``,
       `*--- Readiness ---*`,
-      `*Q11 Investment Ready:* ${typeformData.investment_readiness || 'N/A'}`,
-      `*Q12 Timeline:* ${typeformData.decision_timeline || 'N/A'}`,
-      `*Q13 Has Team:* ${typeformData.has_team || 'N/A'}`,
+      `*Investment Ready:* ${typeformData.investment_readiness || 'N/A'}`,
+      `*Timeline:* ${typeformData.decision_timeline || 'N/A'}`,
+      `*Has Team:* ${typeformData.has_team || 'N/A'}`,
       ``,
       `*--- Additional ---*`,
-      `*Q14 Anything Else:* ${typeformData.anything_else || typeformData.additional_info || 'N/A'}`,
-      `*Q15 Referral Source:* ${typeformData.referral_source || 'N/A'}`
+      `*Anything Else:* ${typeformData.anything_else || typeformData.additional_info || 'N/A'}`,
+      `*Referral Source:* ${typeformData.referral_source || 'N/A'}`
     ];
 
     await sendMessage([
       {
         type: 'header',
-        text: { type: 'plain_text', text: `📝 Typeform Application (All 15 Questions)`, emoji: true }
+        text: { type: 'plain_text', text: `📝 Typeform Application`, emoji: true }
       },
       {
         type: 'section',

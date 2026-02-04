@@ -134,14 +134,22 @@ Write ONLY the welcome message, no additional commentary.`;
   }
 }
 
-// Send delayed welcome message to Slack
-async function sendDelayedWelcome(samcartOrder, typeformData, pool) {
+// Send welcome message thread to #notifications-capro (immediately after SamCart purchase)
+async function sendWelcomeThread(samcartOrder, typeformData, pool) {
   const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
-  const SLACK_WELCOME_USER_ID = process.env.SLACK_WELCOME_USER_ID;
   const BASE_URL = process.env.BASE_URL || 'https://onboarding.copyaccelerator.com';
 
-  if (!SLACK_BOT_TOKEN || !SLACK_WELCOME_USER_ID) {
-    console.log('Slack not configured, skipping delayed welcome');
+  if (!SLACK_BOT_TOKEN) {
+    console.log('Slack not configured, skipping welcome');
+    return false;
+  }
+
+  // Use the SamCart notification thread
+  const channelId = samcartOrder.slack_channel_id;
+  const threadTs = samcartOrder.slack_thread_ts;
+
+  if (!channelId || !threadTs) {
+    console.log('[Welcome] No SamCart thread found, skipping welcome');
     return false;
   }
 
@@ -168,29 +176,19 @@ async function sendDelayedWelcome(samcartOrder, typeformData, pool) {
   const fullName = [memberData.firstName, memberData.lastName].filter(Boolean).join(' ');
   const memberName = fullName || 'New Member';
 
-  console.log(`Sending delayed welcome for: ${memberName} (${samcartOrder.email})`);
+  console.log(`[Welcome] Sending welcome thread for: ${memberName} (${samcartOrder.email})`);
+  console.log(`[Welcome] Thread: ${channelId} / ${threadTs}`);
 
-  // Open DM channel
-  const openResponse = await fetch('https://slack.com/api/conversations.open', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${SLACK_BOT_TOKEN}`
-    },
-    body: JSON.stringify({ users: SLACK_WELCOME_USER_ID })
-  });
-
-  const openData = await openResponse.json();
-  if (!openData.ok) {
-    throw new Error(`Failed to open DM: ${openData.error}`);
-  }
-
-  const channelId = openData.channel.id;
-
-  // Helper to send message
-  async function sendMessage(blocks, text, threadTs = null) {
-    const payload = { channel: channelId, blocks, text };
-    if (threadTs) payload.thread_ts = threadTs;
+  // Helper to send message to thread
+  async function sendMessage(blocks, text) {
+    const payload = {
+      channel: channelId,
+      blocks,
+      text,
+      thread_ts: threadTs,
+      unfurl_links: false,
+      unfurl_media: false
+    };
 
     const response = await fetch('https://slack.com/api/chat.postMessage', {
       method: 'POST',
@@ -202,31 +200,6 @@ async function sendDelayedWelcome(samcartOrder, typeformData, pool) {
     });
     return response.json();
   }
-
-  // Parent message with delayed welcome indicator
-  const parentResult = await sendMessage([
-    {
-      type: 'header',
-      text: { type: 'plain_text', text: `🎉 New Member: ${memberName}`, emoji: true }
-    },
-    {
-      type: 'section',
-      text: { type: 'mrkdwn', text: `*Email:* ${memberData.email || 'N/A'}` }
-    },
-    {
-      type: 'context',
-      elements: [
-        { type: 'mrkdwn', text: '_⏰ Delayed welcome (OnboardingChat not completed after 1 hour) - View thread for details →_' }
-      ]
-    }
-  ], `New member: ${memberName}`);
-
-  if (!parentResult.ok) {
-    throw new Error(`Failed to send parent message: ${parentResult.error}`);
-  }
-
-  const threadTs = parentResult.ts;
-  await new Promise(resolve => setTimeout(resolve, 300));
 
   // Thread message 1: Typeform Data (if available)
   if (typeformData) {
@@ -265,45 +238,22 @@ async function sendDelayedWelcome(samcartOrder, typeformData, pool) {
         type: 'section',
         text: { type: 'mrkdwn', text: typeformFields.join('\n') }
       }
-    ], `Typeform data for ${memberName}`, threadTs);
+    ], `Typeform data for ${memberName}`);
 
     await new Promise(resolve => setTimeout(resolve, 300));
   }
 
-  // Thread message 2: SamCart Data
-  const samcartFields = [
-    `*Product:* ${samcartOrder.product_name || 'N/A'}`,
-    `*Order Total:* ${samcartOrder.order_total ? `$${samcartOrder.order_total}` : 'N/A'}`,
-    `*Order ID:* ${samcartOrder.samcart_order_id || 'N/A'}`,
-    `*Status:* ${samcartOrder.status || 'N/A'}`,
-    `*Email:* ${samcartOrder.email || 'N/A'}`,
-    `*Name:* ${[samcartOrder.first_name, samcartOrder.last_name].filter(Boolean).join(' ') || 'N/A'}`
-  ];
-
-  await sendMessage([
-    {
-      type: 'header',
-      text: { type: 'plain_text', text: `💳 SamCart Purchase`, emoji: true }
-    },
-    {
-      type: 'section',
-      text: { type: 'mrkdwn', text: samcartFields.join('\n\n') }
-    }
-  ], `SamCart data for ${memberName}`, threadTs);
-
-  await new Promise(resolve => setTimeout(resolve, 300));
-
-  // Thread message 3: Note about missing OnboardingChat
+  // Thread message 2: Note about OnboardingChat status
   await sendMessage([
     {
       type: 'section',
       text: { type: 'mrkdwn', text: `⚠️ *Note:* This member has not completed the OnboardingChat yet. The welcome message below is generated from Typeform application data only.` }
     }
-  ], `OnboardingChat not completed`, threadTs);
+  ], `OnboardingChat not completed`);
 
   await new Promise(resolve => setTimeout(resolve, 300));
 
-  // Thread message 4: Generated welcome message
+  // Thread message 3: Generated welcome message
   const welcomeMessage = await generateWelcomeMessage(memberData);
   const copyUrl = `${BASE_URL}/copy.html?text=${encodeURIComponent(welcomeMessage)}`;
 
@@ -336,9 +286,9 @@ async function sendDelayedWelcome(samcartOrder, typeformData, pool) {
         { type: 'mrkdwn', text: '_Reply in this thread to request changes to the welcome message._' }
       ]
     }
-  ], `Welcome message for ${memberName}`, threadTs);
+  ], `Welcome message for ${memberName}`);
 
-  console.log(`Delayed welcome sent successfully for ${memberName}`);
+  console.log(`[Welcome] Welcome thread sent successfully for ${memberName}`);
   return true;
 }
 
@@ -1267,3 +1217,4 @@ router.post('/process-monday-business-owners', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.sendWelcomeThread = sendWelcomeThread;
