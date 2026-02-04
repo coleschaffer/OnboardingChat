@@ -393,6 +393,8 @@ async function postCallBookedNotification(pool, applicationId, applicantName, ap
  */
 async function postOnboardingUpdateToWelcomeThread(pool, email, onboardingData) {
     const slackBlocks = require('../lib/slack-blocks');
+    const { generateWelcomeMessage } = require('./jobs');
+    const BASE_URL = process.env.BASE_URL || 'https://onboarding.copyaccelerator.com';
 
     if (!email) return false;
 
@@ -417,11 +419,87 @@ async function postOnboardingUpdateToWelcomeThread(pool, email, onboardingData) 
 
     console.log(`[Slack] Posting onboarding update to welcome thread ${slack_thread_ts}`);
 
-    try {
-        const businessName = onboardingData.answers?.businessName || onboardingData.businessName;
-        const updateBlock = slackBlocks.createOnboardingUpdateBlock(onboardingData.answers || onboardingData, businessName);
+    // Look up Typeform data for combined welcome message
+    let typeformData = null;
+    const tfResult = await pool.query(
+        'SELECT * FROM typeform_applications WHERE LOWER(email) = LOWER($1) ORDER BY created_at DESC LIMIT 1',
+        [email]
+    );
+    typeformData = tfResult.rows[0] || null;
 
+    try {
+        const answers = onboardingData.answers || onboardingData;
+        const businessName = answers.businessName || onboardingData.businessName;
+
+        // Post onboarding data update
+        const updateBlock = slackBlocks.createOnboardingUpdateBlock(answers, businessName);
         await postMessage(slack_channel_id, updateBlock.text, updateBlock.blocks, slack_thread_ts);
+
+        await new Promise(resolve => setTimeout(resolve, 300));
+
+        // Build combined memberData from Typeform + Onboarding
+        const memberData = {
+            firstName: typeformData?.first_name || answers.firstName || '',
+            lastName: typeformData?.last_name || answers.lastName || '',
+            email: typeformData?.email || email || '',
+            phone: typeformData?.phone || answers.phone || '',
+            businessName: businessName || '',
+            businessOverview: answers.bio || '',
+            massiveWin: answers.massiveWin || '',
+            teamCount: answers.teamCount || '',
+            trafficSources: answers.trafficSources || '',
+            landingPages: answers.landingPages || '',
+            aiSkillLevel: answers.aiSkillLevel || '',
+            bio: answers.bio || '',
+            // Typeform-specific fields
+            typeformBusinessDescription: typeformData?.business_description || '',
+            typeformAnnualRevenue: typeformData?.annual_revenue || '',
+            typeformRevenueTrend: typeformData?.revenue_trend || '',
+            typeformMainChallenge: typeformData?.main_challenge || '',
+            typeformWhyCaPro: typeformData?.why_ca_pro || '',
+            typeformContactPreference: typeformData?.contact_preference || '',
+            typeformInvestmentReadiness: typeformData?.investment_readiness || '',
+            typeformDecisionTimeline: typeformData?.decision_timeline || '',
+            typeformHasTeam: typeformData?.has_team || '',
+            typeformAnythingElse: typeformData?.anything_else || typeformData?.additional_info || '',
+            typeformReferralSource: typeformData?.referral_source || ''
+        };
+
+        // Generate NEW welcome message with full data
+        const welcomeMessage = await generateWelcomeMessage(memberData);
+        const copyUrl = `${BASE_URL}/copy.html?text=${encodeURIComponent(welcomeMessage)}`;
+
+        // Post the updated welcome message
+        await postMessage(slack_channel_id, `Updated welcome for ${businessName}`, [
+            {
+                type: 'header',
+                text: { type: 'plain_text', text: '✨ Updated Welcome Message (Full Data)', emoji: true }
+            },
+            {
+                type: 'section',
+                text: { type: 'mrkdwn', text: welcomeMessage }
+            },
+            {
+                type: 'divider'
+            },
+            {
+                type: 'actions',
+                elements: [
+                    {
+                        type: 'button',
+                        text: { type: 'plain_text', text: '📋 Copy to Clipboard', emoji: true },
+                        url: copyUrl,
+                        style: 'primary'
+                    }
+                ]
+            },
+            {
+                type: 'context',
+                elements: [
+                    { type: 'mrkdwn', text: '_This welcome was generated with complete Typeform + OnboardingChat data. Reply in thread to request changes._' }
+                ]
+            }
+        ], slack_thread_ts);
 
         // Log activity
         await pool.query(`
@@ -430,10 +508,11 @@ async function postOnboardingUpdateToWelcomeThread(pool, email, onboardingData) 
         `, ['slack_onboarding_update_posted', 'samcart_order', order.id, JSON.stringify({
             email: email,
             business_name: businessName,
-            thread_ts: slack_thread_ts
+            thread_ts: slack_thread_ts,
+            welcome_regenerated: true
         })]);
 
-        console.log(`[Slack] Onboarding update posted to welcome thread for ${email}`);
+        console.log(`[Slack] Onboarding update + new welcome posted for ${email}`);
         return true;
     } catch (error) {
         console.error(`[Slack] Error posting onboarding update: ${error.message}`);

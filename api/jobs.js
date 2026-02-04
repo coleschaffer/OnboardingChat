@@ -1218,3 +1218,4 @@ router.post('/process-monday-business-owners', async (req, res) => {
 
 module.exports = router;
 module.exports.sendWelcomeThread = sendWelcomeThread;
+module.exports.generateWelcomeMessage = generateWelcomeMessage;
