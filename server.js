@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const { Pool } = require('pg');
+const { initializeWebhook: initializeCalendlyWebhook } = require('./lib/calendly');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -27,6 +28,13 @@ app.use('/api/slack', express.json({
 }));
 app.use('/api/slack', express.urlencoded({
   extended: true,
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString();
+  }
+}));
+
+// Capture raw body for Calendly webhook signature verification
+app.use('/api/webhooks/calendly', express.json({
   verify: (req, res, buf) => {
     req.rawBody = buf.toString();
   }
@@ -295,6 +303,11 @@ app.listen(PORT, async () => {
 
   // Run migrations after server starts
   await runMigrations();
+
+  // Initialize Calendly webhook subscription
+  initializeCalendlyWebhook(pool).catch(err => {
+    console.error('Failed to initialize Calendly webhook:', err.message);
+  });
 });
 
 // Graceful shutdown
