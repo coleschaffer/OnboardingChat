@@ -376,12 +376,12 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
                 return res.status(200).send();
             }
 
-            // Handle "Undo" button click - cancel pending email
-            if (action.action_id === 'undo_pending_email') {
+            // Handle "Cancel" button click - cancel pending email and delete message
+            if (action.action_id === 'cancel_pending_email') {
                 const pendingEmailId = action.value;
                 const pool = req.app.locals.pool;
 
-                // Cancel the pending email
+                // Cancel the pending email and get the sending_message_ts
                 const result = await pool.query(`
                     UPDATE pending_email_sends
                     SET status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP
@@ -392,15 +392,16 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
                 if (result.rows.length > 0) {
                     const pending = result.rows[0];
 
-                    // Reopen the modal with the previous text
-                    const modal = slackBlocks.createSendMessageModal(
-                        '', // We'll need to get name from application
-                        pending.to_email,
-                        pending.gmail_thread_id,
-                        pending.typeform_application_id,
-                        pending.body // Previous text
-                    );
-                    await openModal(triggerId, modal);
+                    // Delete the "Sending..." message
+                    if (pending.channel_id && pending.sending_message_ts) {
+                        try {
+                            await deleteMessage(pending.channel_id, pending.sending_message_ts);
+                        } catch (delErr) {
+                            console.log('[Slack] Could not delete sending message:', delErr.message);
+                        }
+                    }
+
+                    console.log(`[Email] Cancelled pending email to ${pending.to_email}`);
                 }
                 return res.status(200).send();
             }
@@ -667,14 +668,19 @@ router.post('/events', verifySlackSignature, async (req, res) => {
         res.status(200).send();
 
         // Handle message events in threads
+        console.log('[Slack Events] Received event:', payload.event?.type, 'subtype:', payload.event?.subtype);
+
         if (payload.event?.type === 'message' &&
             payload.event.thread_ts &&
-            !payload.event.bot_id) {
+            !payload.event.bot_id &&
+            !payload.event.subtype) { // Ignore message_changed, message_deleted, etc.
 
             const event = payload.event;
             const editRequest = event.text;
             const threadTs = event.thread_ts;
             const channelId = event.channel;
+
+            console.log(`[Slack Events] Thread reply in ${channelId}, thread ${threadTs}: "${editRequest?.substring(0, 50)}..."`);
 
             // Get the full thread to find the welcome message with metadata
             const historyResponse = await fetch(`https://slack.com/api/conversations.replies?channel=${channelId}&ts=${threadTs}&include_all_metadata=true`, {
@@ -736,10 +742,18 @@ router.post('/events', verifySlackSignature, async (req, res) => {
                 }
             }
 
-            console.log('Editing welcome message with context:', Object.keys(memberData).length, 'fields');
+            console.log('[Slack Events] Editing welcome message with context:', Object.keys(memberData).length, 'fields');
+            console.log('[Slack Events] Edit request:', editRequest);
 
             // Generate edited message with full member context
-            let editedMessage = await editWelcomeMessage(latestWelcome, editRequest, memberData);
+            let editedMessage;
+            try {
+                editedMessage = await editWelcomeMessage(latestWelcome, editRequest, memberData);
+                console.log('[Slack Events] Claude returned edited message');
+            } catch (claudeError) {
+                console.error('[Slack Events] Claude API error:', claudeError.message);
+                return;
+            }
 
             // Strip leading/trailing quotes if Claude wrapped the message in them
             editedMessage = editedMessage.replace(/^["']|["']$/g, '').trim();

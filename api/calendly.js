@@ -38,16 +38,23 @@ router.post('/', async (req, res) => {
         const payload = req.body.payload;
 
         console.log('Calendly webhook received:', event);
+        console.log('Calendly payload:', JSON.stringify(payload, null, 2));
 
         if (event !== 'invitee.created') {
             // We only care about new bookings
             return res.json({ received: true, event });
         }
 
-        // Extract invitee info
-        const invitee = payload.invitee;
-        const email = invitee.email?.toLowerCase();
-        const name = invitee.name;
+        if (!payload) {
+            console.log('No payload in Calendly webhook');
+            return res.json({ received: true, warning: 'no payload' });
+        }
+
+        // Extract invitee info - handle different payload structures
+        // Calendly v2 API uses payload.invitee, but some versions use payload directly
+        const invitee = payload.invitee || payload;
+        const email = (invitee.email || payload.email)?.toLowerCase();
+        const name = invitee.name || payload.name;
 
         if (!email) {
             console.log('No email in Calendly invitee');
