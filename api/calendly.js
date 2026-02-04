@@ -73,9 +73,26 @@ router.post('/', async (req, res) => {
             });
         }
 
+        // Check if this person is already a paying member (has SamCart order)
+        // If so, this is a member 1:1 call, not a qualification call - skip notification
+        const samcartResult = await pool.query(
+            'SELECT id FROM samcart_orders WHERE LOWER(email) = $1 LIMIT 1',
+            [email]
+        );
+
+        if (samcartResult.rows.length > 0) {
+            console.log(`[Calendly] ${email} is already a member (has SamCart order) - skipping notification`);
+            return res.json({
+                received: true,
+                skipped: true,
+                reason: 'existing_member',
+                email
+            });
+        }
+
         // Find matching typeform application - try email first, then fall back to name
         let appResult = await pool.query(
-            'SELECT id, first_name, last_name, email FROM typeform_applications WHERE LOWER(email) = $1',
+            'SELECT id, first_name, last_name, email, call_booked_at FROM typeform_applications WHERE LOWER(email) = $1',
             [email]
         );
 
@@ -91,7 +108,7 @@ router.post('/', async (req, res) => {
 
             if (firstName && lastName) {
                 appResult = await pool.query(`
-                    SELECT id, first_name, last_name, email
+                    SELECT id, first_name, last_name, email, call_booked_at
                     FROM typeform_applications
                     WHERE LOWER(first_name) = LOWER($1)
                       AND LOWER(last_name) = LOWER($2)
@@ -114,6 +131,38 @@ router.post('/', async (req, res) => {
 
         const application = appResult.rows[0];
         const applicantName = `${application.first_name || ''} ${application.last_name || ''}`.trim() || name;
+
+        // Also check if the application's email has a SamCart order
+        // (handles case where Calendly email differs from purchase email)
+        if (application.email && application.email.toLowerCase() !== email) {
+            const appEmailSamcart = await pool.query(
+                'SELECT id FROM samcart_orders WHERE LOWER(email) = $1 LIMIT 1',
+                [application.email.toLowerCase()]
+            );
+            if (appEmailSamcart.rows.length > 0) {
+                console.log(`[Calendly] ${application.email} (from app) is already a member - skipping notification`);
+                return res.json({
+                    received: true,
+                    skipped: true,
+                    reason: 'existing_member',
+                    email,
+                    application_email: application.email
+                });
+            }
+        }
+
+        // Check if we've already posted a call booked notification for this application
+        // This prevents duplicate notifications if they book multiple calls
+        if (application.call_booked_at) {
+            console.log(`[Calendly] ${email} already has call_booked_at set - skipping duplicate notification`);
+            return res.json({
+                received: true,
+                skipped: true,
+                reason: 'already_notified',
+                email,
+                application_id: application.id
+            });
+        }
 
         // Update call_booked_at timestamp
         await pool.query(
