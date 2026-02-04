@@ -10,6 +10,24 @@ let membersPage = 0;
 let teamMembersPage = 0;
 const pageSize = 20;
 
+// Monday-style board state (applications)
+let applicationsLastResponse = null;
+let applicationsTableUXInitialized = false;
+let applicationsGroupCollapsed = (() => {
+    try {
+        return JSON.parse(localStorage.getItem('admin.applications.groupCollapsed') || '{}') || {};
+    } catch {
+        return {};
+    }
+})();
+let applicationsSort = (() => {
+    try {
+        return JSON.parse(localStorage.getItem('admin.applications.sort') || 'null') || { key: 'created_at', dir: 'desc' };
+    } catch {
+        return { key: 'created_at', dir: 'desc' };
+    }
+})();
+
 // Password Gate
 function checkAuth() {
     return sessionStorage.getItem('admin_authenticated') === 'true';
@@ -392,46 +410,244 @@ function renderStatusChart(status) {
     `).join('');
 }
 
-// Applications
-async function loadApplications() {
-    const tbody = document.getElementById('applications-tbody');
-    tbody.innerHTML = '<tr><td colspan="7" class="loading">Loading...</td></tr>';
+// Table UX helpers (resizing + sorting)
+function enableTableColumnResizing(tableId, storageKey) {
+    const table = document.getElementById(tableId);
+    if (!table) return;
 
+    const ths = Array.from(table.querySelectorAll('thead th'));
+    if (ths.length === 0) return;
+
+    // Apply saved widths
     try {
-        const search = document.getElementById('applications-search')?.value || '';
-        const status = document.getElementById('applications-filter')?.value || '';
+        const saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
+        if (Array.isArray(saved) && saved.length === ths.length) {
+            ths.forEach((th, i) => {
+                if (saved[i]) th.style.width = `${saved[i]}px`;
+            });
+        }
+    } catch {
+        // ignore
+    }
 
-        const params = new URLSearchParams({
-            limit: pageSize,
-            offset: applicationsPage * pageSize
+    ths.forEach((th, i) => {
+        // Avoid double-adding resizers
+        if (th.querySelector('.col-resizer')) return;
+        if (i === ths.length - 1) return;
+
+        const resizer = document.createElement('div');
+        resizer.className = 'col-resizer';
+        resizer.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+
+            const startX = e.clientX;
+            const startWidth = th.getBoundingClientRect().width;
+
+            const onMove = (moveEvent) => {
+                const delta = moveEvent.clientX - startX;
+                const next = Math.max(90, Math.round(startWidth + delta));
+                th.style.width = `${next}px`;
+            };
+
+            const onUp = () => {
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+
+                const widths = ths.map(t => Math.round(t.getBoundingClientRect().width));
+                localStorage.setItem(storageKey, JSON.stringify(widths));
+            };
+
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
         });
-        if (search) params.append('search', search);
-        if (status) params.append('status', status);
 
-        const data = await fetchAPI(`/applications?${params}`);
+        th.appendChild(resizer);
+    });
+}
 
-        if (data.applications.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="7" class="loading">No applications found</td></tr>';
-        } else {
-            tbody.innerHTML = data.applications.map(app => {
-                // Use computed display_status from API
-                const displayStatus = app.display_status || 'new';
-                const statusInfo = formatDisplayStatus(displayStatus, app.status_timestamp);
-                const noteCount = app.note_count || 0;
+function getApplicationsStageOrder() {
+    return ['new', 'emailed', 'replied', 'call_booked', 'purchased', 'onboarding_started', 'onboarding_complete', 'joined'];
+}
 
-                return `
+function getStageLabel(stageKey) {
+    return formatDisplayStatus(stageKey, null).text;
+}
+
+function compareApplications(a, b) {
+    const { key, dir } = applicationsSort || { key: 'created_at', dir: 'desc' };
+    const direction = dir === 'asc' ? 1 : -1;
+
+    const value = (app) => {
+        switch (key) {
+            case 'name':
+                return `${app.first_name || ''} ${app.last_name || ''}`.trim().toLowerCase();
+            case 'email':
+                return (app.email || '').toLowerCase();
+            case 'revenue':
+                return (app.annual_revenue || '').toLowerCase();
+            case 'notes':
+                return Number(app.note_count || 0);
+            case 'created_at':
+            default:
+                return new Date(app.created_at || 0).getTime();
+        }
+    };
+
+    const av = value(a);
+    const bv = value(b);
+    if (av < bv) return -1 * direction;
+    if (av > bv) return 1 * direction;
+    return 0;
+}
+
+function updateApplicationsSortIndicators() {
+    const table = document.getElementById('applications-table');
+    if (!table) return;
+
+    const ths = Array.from(table.querySelectorAll('thead th'));
+    ths.forEach(th => th.classList.remove('sorted', 'asc', 'desc'));
+
+    const keyToIndex = {
+        name: 0,
+        email: 1,
+        revenue: 2,
+        notes: 4,
+        created_at: 5
+    };
+
+    const index = keyToIndex[applicationsSort?.key];
+    if (index == null || !ths[index]) return;
+
+    ths[index].classList.add('sorted', applicationsSort.dir === 'asc' ? 'asc' : 'desc');
+}
+
+function setApplicationsSort(nextKey) {
+    if (!nextKey) return;
+
+    if (applicationsSort.key === nextKey) {
+        applicationsSort.dir = applicationsSort.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+        applicationsSort.key = nextKey;
+        applicationsSort.dir = nextKey === 'created_at' ? 'desc' : 'asc';
+    }
+
+    localStorage.setItem('admin.applications.sort', JSON.stringify(applicationsSort));
+    updateApplicationsSortIndicators();
+    renderApplicationsTable();
+}
+
+function toggleApplicationsGroup(stageKey) {
+    applicationsGroupCollapsed[stageKey] = !applicationsGroupCollapsed[stageKey];
+    localStorage.setItem('admin.applications.groupCollapsed', JSON.stringify(applicationsGroupCollapsed));
+    renderApplicationsTable();
+}
+
+function initApplicationsTableUX() {
+    if (applicationsTableUXInitialized) return;
+    applicationsTableUXInitialized = true;
+
+    enableTableColumnResizing('applications-table', 'admin.applications.colWidths');
+
+    const table = document.getElementById('applications-table');
+    if (!table) return;
+
+    const ths = Array.from(table.querySelectorAll('thead th'));
+    const sortableByIndex = new Map([
+        [0, 'name'],
+        [1, 'email'],
+        [2, 'revenue'],
+        [4, 'notes'],
+        [5, 'created_at']
+    ]);
+
+    ths.forEach((th, index) => {
+        const sortKey = sortableByIndex.get(index);
+        if (!sortKey) return;
+
+        th.classList.add('sortable');
+        th.addEventListener('click', (e) => {
+            if (e.target.closest('.col-resizer')) return;
+            setApplicationsSort(sortKey);
+        });
+    });
+
+    updateApplicationsSortIndicators();
+}
+
+function renderApplicationsTable() {
+    const tbody = document.getElementById('applications-tbody');
+    if (!tbody) return;
+    if (!applicationsLastResponse) return;
+
+    const apps = applicationsLastResponse.applications || [];
+    if (apps.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" class="loading">No applications found</td></tr>';
+        return;
+    }
+
+    // Group by pipeline stage (display_status)
+    const groups = apps.reduce((acc, app) => {
+        const stage = app.display_status || 'new';
+        (acc[stage] ||= []).push(app);
+        return acc;
+    }, {});
+
+    const orderedStages = getApplicationsStageOrder();
+    const unknownStages = Object.keys(groups).filter(k => !orderedStages.includes(k)).sort();
+    const stagesToRender = [...orderedStages, ...unknownStages].filter(k => (groups[k] || []).length > 0);
+
+    const rows = [];
+
+    for (const stageKey of stagesToRender) {
+        const stageApps = groups[stageKey] || [];
+        const collapsed = !!applicationsGroupCollapsed[stageKey];
+
+        rows.push(`
+            <tr class="group-header-row">
+                <td colspan="7">
+                    <div class="group-row">
+                        <button class="group-toggle" type="button" onclick="toggleApplicationsGroup('${stageKey}')">${collapsed ? '▸' : '▾'}</button>
+                        <span class="group-color ${stageKey}"></span>
+                        <span>${escapeHtml(getStageLabel(stageKey))}</span>
+                        <span class="group-count">${stageApps.length}</span>
+                    </div>
+                </td>
+            </tr>
+        `);
+
+        if (collapsed) continue;
+
+        const sorted = [...stageApps].sort(compareApplications);
+        rows.push(sorted.map(app => {
+            const displayStatus = app.display_status || 'new';
+            const statusInfo = formatDisplayStatus(displayStatus, app.status_timestamp);
+            const noteCount = app.note_count || 0;
+            const displayName = `${app.first_name || ''} ${app.last_name || ''}`.trim() || '-';
+
+            return `
                 <tr class="clickable-row" onclick="viewApplication('${app.id}')">
-                    <td><strong>${app.first_name || ''} ${app.last_name || ''}</strong></td>
-                    <td>${app.email || '-'}</td>
-                    <td>${app.annual_revenue || '-'}</td>
+                    <td><strong>${escapeHtml(displayName)}</strong></td>
+                    <td>${escapeHtml(app.email || '-')}</td>
+                    <td>${escapeHtml(app.annual_revenue || '-')}</td>
                     <td>
                         <div class="status-with-time">
-                            <span class="status-badge ${displayStatus}">${statusInfo.text}</span>
-                            ${statusInfo.time ? `<span class="status-time">${statusInfo.time}</span>` : ''}
+                            <span class="status-badge ${displayStatus}">${escapeHtml(statusInfo.text)}</span>
+                            ${statusInfo.time ? `<span class="status-time">${escapeHtml(statusInfo.time)}</span>` : ''}
+                        </div>
+                        <div style="margin-top: 6px;">
+                            <select class="inline-status-select app-status ${app.status || 'new'}"
+                                    onclick="event.stopPropagation()"
+                                    onchange="event.stopPropagation(); this.className = 'inline-status-select app-status ' + this.value; updateApplicationStatus('${app.id}', this.value)">
+                                <option value="new" ${app.status === 'new' ? 'selected' : ''}>New</option>
+                                <option value="reviewed" ${app.status === 'reviewed' ? 'selected' : ''}>Reviewed</option>
+                                <option value="approved" ${app.status === 'approved' ? 'selected' : ''}>Approved</option>
+                                <option value="rejected" ${app.status === 'rejected' ? 'selected' : ''}>Rejected</option>
+                            </select>
                         </div>
                     </td>
                     <td>
-                        <button class="notes-btn ${noteCount > 0 ? 'has-notes' : ''}" onclick="event.stopPropagation(); openNotesPanel('${app.id}', '${escapeHtml((app.first_name || '') + ' ' + (app.last_name || ''))}')" title="${noteCount > 0 ? noteCount + ' note(s)' : 'Add note'}">
+                        <button class="notes-btn ${noteCount > 0 ? 'has-notes' : ''}" onclick="event.stopPropagation(); openNotesPanel('${app.id}')" title="${noteCount > 0 ? noteCount + ' note(s)' : 'Add note'}">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
                                 <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
@@ -468,9 +684,34 @@ async function loadApplications() {
                         </div>
                     </td>
                 </tr>
-            `}).join('');
-        }
+            `;
+        }).join(''));
+    }
 
+    tbody.innerHTML = rows.join('');
+}
+
+// Applications
+async function loadApplications() {
+    const tbody = document.getElementById('applications-tbody');
+    tbody.innerHTML = '<tr><td colspan="7" class="loading">Loading...</td></tr>';
+
+    try {
+        const search = document.getElementById('applications-search')?.value || '';
+        const status = document.getElementById('applications-filter')?.value || '';
+
+        const params = new URLSearchParams({
+            limit: pageSize,
+            offset: applicationsPage * pageSize
+        });
+        if (search) params.append('search', search);
+        if (status) params.append('status', status);
+
+        const data = await fetchAPI(`/applications?${params}`);
+        applicationsLastResponse = data;
+
+        initApplicationsTableUX();
+        renderApplicationsTable();
         renderPagination('applications', data.total, applicationsPage);
     } catch (error) {
         console.error('Error loading applications:', error);
@@ -478,7 +719,7 @@ async function loadApplications() {
     }
 }
 
-async function viewApplication(id) {
+async function viewApplication(id, options = {}) {
     closeAllKebabMenus();
     try {
         const [app, notes] = await Promise.all([
@@ -488,7 +729,11 @@ async function viewApplication(id) {
 
         const statusInfo = formatDisplayStatus(app.display_status || 'new', app.status_timestamp);
 
-        openModal('Typeform Application - All 15 Questions', `
+        const title = ([app.first_name, app.last_name].filter(Boolean).join(' ').trim()) || app.email || 'Typeform Application';
+        const subtitle = [app.email, statusInfo.text].filter(Boolean).join(' • ');
+        const activeTab = options.activeTab || 'overview';
+
+        const overviewHtml = `
             <h4 style="color: var(--orange); margin-bottom: 12px; border-bottom: 1px solid var(--border); padding-bottom: 8px;">Contact Info (Q1-Q5)</h4>
             <div class="detail-row">
                 <span class="detail-label">Q1-2: Name</span>
@@ -564,6 +809,17 @@ async function viewApplication(id) {
                 </span>
             </div>
             <div class="detail-row">
+                <span class="detail-label">Application Status</span>
+                <span class="detail-value">
+                    <select class="inline-status-select app-status ${app.status || 'new'}" onchange="event.stopPropagation(); this.className = 'inline-status-select app-status ' + this.value; updateApplicationStatus('${id}', this.value)">
+                        <option value="new" ${app.status === 'new' ? 'selected' : ''}>New</option>
+                        <option value="reviewed" ${app.status === 'reviewed' ? 'selected' : ''}>Reviewed</option>
+                        <option value="approved" ${app.status === 'approved' ? 'selected' : ''}>Approved</option>
+                        <option value="rejected" ${app.status === 'rejected' ? 'selected' : ''}>Rejected</option>
+                    </select>
+                </span>
+            </div>
+            <div class="detail-row">
                 <span class="detail-label">Applied</span>
                 <span class="detail-value">${formatDate(app.created_at)}</span>
             </div>
@@ -573,9 +829,30 @@ async function viewApplication(id) {
             ${app.onboarding_started_at ? `<div class="detail-row"><span class="detail-label">Chat Started</span><span class="detail-value">${formatDate(app.onboarding_started_at)}</span></div>` : ''}
             ${app.onboarding_completed_at ? `<div class="detail-row"><span class="detail-label">Chat Complete</span><span class="detail-value">${formatDate(app.onboarding_completed_at)}</span></div>` : ''}
             ${app.whatsapp_joined_at ? `<div class="detail-row"><span class="detail-label">WhatsApp Joined</span><span class="detail-value">${formatDate(app.whatsapp_joined_at)}</span></div>` : ''}
+        `;
 
+        const notesHtml = `
             ${renderNotesSection(notes, id)}
-        `);
+        `;
+
+        const rawData = app.raw_data || {};
+        const rawHtml = `
+            <pre style="background: var(--gray-50); padding: 16px; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; border: 1px solid var(--gray-200);">${escapeHtml(JSON.stringify(rawData, null, 2))}</pre>
+        `;
+
+        panelState.activeTabId = activeTab;
+        openItemPanel({
+            title,
+            subtitle,
+            tabs: [
+                { id: 'overview', label: 'Overview', content: overviewHtml },
+                { id: 'notes', label: `Notes (${notes.length})`, content: notesHtml },
+                { id: 'raw', label: 'Raw', content: rawHtml }
+            ],
+            footer: `
+                <button class="btn btn-secondary btn-sm" type="button" onclick="convertApplication('${id}')">Convert to Member</button>
+            `
+        });
     } catch (error) {
         showToast('Failed to load application details', 'error');
     }
@@ -592,6 +869,20 @@ async function updateApplicationStatus(id, status) {
         loadOverview();
     } catch (error) {
         showToast('Failed to update status', 'error');
+    }
+}
+
+async function updateMemberOnboardingStatus(id, onboarding_status) {
+    try {
+        await fetchAPI(`/members/${id}`, {
+            method: 'PUT',
+            body: JSON.stringify({ onboarding_status })
+        });
+        showToast(`Member status updated`, 'success');
+        loadMembers();
+        loadOverview();
+    } catch (error) {
+        showToast('Failed to update member status', 'error');
     }
 }
 
@@ -612,6 +903,8 @@ async function loadMembers() {
     tbody.innerHTML = '<tr><td colspan="7" class="loading">Loading...</td></tr>';
 
     try {
+        enableTableColumnResizing('members-table', 'admin.members.colWidths');
+
         const search = document.getElementById('members-search')?.value || '';
         const source = document.getElementById('members-source-filter')?.value || '';
         const status = document.getElementById('members-status-filter')?.value || '';
@@ -636,7 +929,15 @@ async function loadMembers() {
                     <td>${member.email || '-'}</td>
                     <td>${member.annual_revenue || '-'}</td>
                     <td>${member.team_member_count || 0}</td>
-                    <td><span class="status-badge ${member.onboarding_status}">${member.onboarding_status?.replace('_', ' ') || 'pending'}</span></td>
+                    <td>
+                        <select class="inline-status-select member-status ${member.onboarding_status || 'pending'}"
+                                onclick="event.stopPropagation()"
+                                onchange="event.stopPropagation(); this.className = 'inline-status-select member-status ' + this.value; updateMemberOnboardingStatus('${member.id}', this.value)">
+                            <option value="pending" ${member.onboarding_status === 'pending' ? 'selected' : ''}>Pending</option>
+                            <option value="in_progress" ${member.onboarding_status === 'in_progress' ? 'selected' : ''}>In Progress</option>
+                            <option value="completed" ${member.onboarding_status === 'completed' ? 'selected' : ''}>Completed</option>
+                        </select>
+                    </td>
                     <td>
                         <div class="kebab-menu">
                             <button class="kebab-btn" onclick="toggleKebabMenu(event, 'member-${member.id}')">
@@ -726,7 +1027,13 @@ async function viewMember(id) {
             `;
         }
 
-        openModal(`${member.first_name || ''} ${member.last_name || ''} - Unified Profile`, `
+        const memberTitle = ([member.first_name, member.last_name].filter(Boolean).join(' ').trim()) || member.email || 'Member';
+        const memberSubtitle = member.email || '';
+
+        openItemPanel({
+            title: memberTitle,
+            subtitle: memberSubtitle,
+            content: `
             <div class="detail-row">
                 <span class="detail-label">Business</span>
                 <span class="detail-value">${member.business_name || '-'}</span>
@@ -775,18 +1082,26 @@ async function viewMember(id) {
                 <span class="detail-label">WhatsApp</span>
                 <span class="detail-value">${member.whatsapp_number || '-'} ${member.whatsapp_joined ? '(joined)' : ''}</span>
             </div>
+            ${member.whatsapp_joined_at ? `<div class="detail-row"><span class="detail-label">WhatsApp Joined</span><span class="detail-value">${formatDate(member.whatsapp_joined_at)}</span></div>` : ''}
             <div class="detail-row">
                 <span class="detail-label">Source</span>
                 <span class="detail-value">${member.source?.replace('_', ' ') || '-'}</span>
             </div>
             <div class="detail-row">
                 <span class="detail-label">Status</span>
-                <span class="detail-value"><span class="status-badge ${member.onboarding_status}">${member.onboarding_status?.replace('_', ' ') || 'pending'}</span></span>
+                <span class="detail-value">
+                    <select class="inline-status-select member-status ${member.onboarding_status || 'pending'}" onchange="event.stopPropagation(); this.className = 'inline-status-select member-status ' + this.value; updateMemberOnboardingStatus('${member.id}', this.value)">
+                        <option value="pending" ${member.onboarding_status === 'pending' ? 'selected' : ''}>Pending</option>
+                        <option value="in_progress" ${member.onboarding_status === 'in_progress' ? 'selected' : ''}>In Progress</option>
+                        <option value="completed" ${member.onboarding_status === 'completed' ? 'selected' : ''}>Completed</option>
+                    </select>
+                </span>
             </div>
             ${typeformHtml}
             ${samcartHtml}
             ${teamHtml}
-        `);
+            `
+        });
     } catch (error) {
         showToast('Failed to load member details', 'error');
     }
@@ -798,6 +1113,8 @@ async function loadTeamMembers() {
     tbody.innerHTML = '<tr><td colspan="6" class="loading">Loading...</td></tr>';
 
     try {
+        enableTableColumnResizing('team-members-table', 'admin.teamMembers.colWidths');
+
         const search = document.getElementById('team-members-search')?.value || '';
 
         const params = new URLSearchParams({
@@ -865,7 +1182,13 @@ async function loadTeamMembers() {
 async function viewTeamMember(id) {
     try {
         const tm = await fetchAPI(`/team-members/${id}`);
-        openModal(`${tm.first_name} ${tm.last_name}`, `
+        const title = ([tm.first_name, tm.last_name].filter(Boolean).join(' ').trim()) || tm.email || 'Team Member';
+        const subtitle = tm.email || '';
+
+        openItemPanel({
+            title,
+            subtitle,
+            content: `
             <div class="detail-row">
                 <span class="detail-label">Email</span>
                 <span class="detail-value">${tm.email || '-'}</span>
@@ -910,7 +1233,8 @@ async function viewTeamMember(id) {
                 <span class="detail-label">Source</span>
                 <span class="detail-value">${tm.source?.replace('_', ' ') || '-'}</span>
             </div>
-        `);
+            `
+        });
     } catch (error) {
         showToast('Failed to load team member details', 'error');
     }
@@ -922,6 +1246,8 @@ async function loadOnboarding() {
     const tbody = document.getElementById('submissions-tbody');
 
     try {
+        enableTableColumnResizing('submissions-table', 'admin.submissions.colWidths');
+
         // Get filter values
         const search = document.getElementById('submissions-search')?.value || '';
         const completeFilter = document.getElementById('submissions-filter')?.value || '';
@@ -1033,9 +1359,16 @@ async function viewSubmission(id) {
         const sub = await fetchAPI(`/onboarding/submissions/${id}`);
         const data = sub.data || {};
 
-        openModal('Submission Data', `
-            <pre style="background: var(--gray-50); padding: 16px; border-radius: 8px; overflow-x: auto; font-size: 0.85rem;">${JSON.stringify(data, null, 2)}</pre>
-        `);
+        const title = 'Submission';
+        const subtitle = sub.updated_at ? `Updated ${formatDate(sub.updated_at)}` : (sub.created_at ? `Created ${formatDate(sub.created_at)}` : '');
+
+        openItemPanel({
+            title,
+            subtitle,
+            content: `
+                <pre style="background: var(--gray-50); padding: 16px; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; border: 1px solid var(--gray-200);">${escapeHtml(JSON.stringify(data, null, 2))}</pre>
+            `
+        });
     } catch (error) {
         showToast('Failed to load submission data', 'error');
     }
@@ -1186,6 +1519,8 @@ async function loadImportHistory() {
     tbody.innerHTML = '<tr><td colspan="5" class="loading">Loading...</td></tr>';
 
     try {
+        enableTableColumnResizing('import-history-table', 'admin.importHistory.colWidths');
+
         const data = await fetchAPI('/import/history');
 
         if (data.imports.length === 0) {
@@ -1264,25 +1599,90 @@ function changePage(type, page) {
     }
 }
 
-// Modal
+// Right-side Item Panel (Monday-style)
+const panelState = {
+    tabs: [],
+    activeTabId: null
+};
+
+function renderPanelTabs(tabs, activeTabId) {
+    const tabsEl = document.getElementById('item-panel-tabs');
+    if (!tabs || tabs.length === 0) {
+        tabsEl.innerHTML = '';
+        tabsEl.style.display = 'none';
+        return;
+    }
+
+    tabsEl.style.display = 'flex';
+    tabsEl.innerHTML = tabs.map(t => `
+        <button class="panel-tab ${t.id === activeTabId ? 'active' : ''}" type="button" onclick="setActivePanelTab('${t.id}')">
+            ${escapeHtml(t.label)}
+        </button>
+    `).join('');
+}
+
+function setActivePanelTab(tabId) {
+    if (!panelState.tabs || panelState.tabs.length === 0) return;
+
+    const tab = panelState.tabs.find(t => t.id === tabId);
+    if (!tab) return;
+
+    panelState.activeTabId = tabId;
+
+    // Update tab active state + body
+    renderPanelTabs(panelState.tabs, panelState.activeTabId);
+    document.getElementById('item-panel-body').innerHTML = tab.content || '';
+}
+
+function openItemPanel({ title, subtitle = '', tabs = null, content = '', footer = '' }) {
+    const overlay = document.getElementById('item-panel-overlay');
+    overlay.classList.add('active');
+    overlay.setAttribute('aria-hidden', 'false');
+
+    document.getElementById('item-panel-title').textContent = title || 'Details';
+    document.getElementById('item-panel-subtitle').textContent = subtitle || '';
+    document.getElementById('item-panel-footer').innerHTML = footer || '';
+
+    if (tabs && tabs.length > 0) {
+        panelState.tabs = tabs;
+        panelState.activeTabId = tabs.find(t => t.id === panelState.activeTabId)?.id || tabs[0].id;
+        renderPanelTabs(panelState.tabs, panelState.activeTabId);
+        const active = panelState.tabs.find(t => t.id === panelState.activeTabId) || panelState.tabs[0];
+        document.getElementById('item-panel-body').innerHTML = active.content || '';
+        return;
+    }
+
+    panelState.tabs = [];
+    panelState.activeTabId = null;
+    renderPanelTabs([], null);
+    document.getElementById('item-panel-body').innerHTML = content || '';
+}
+
+function closeItemPanel() {
+    const overlay = document.getElementById('item-panel-overlay');
+    overlay.classList.remove('active');
+    overlay.setAttribute('aria-hidden', 'true');
+    panelState.tabs = [];
+    panelState.activeTabId = null;
+}
+
+// Keep legacy modal API but route it into the right-side panel
 function openModal(title, content) {
-    document.getElementById('modal-title').textContent = title;
-    document.getElementById('modal-body').innerHTML = content;
-    document.getElementById('modal-overlay').classList.add('active');
+    openItemPanel({ title, content });
 }
 
 function closeModal() {
-    document.getElementById('modal-overlay').classList.remove('active');
+    closeItemPanel();
 }
 
-// Close modal on overlay click
-document.getElementById('modal-overlay').addEventListener('click', (e) => {
-    if (e.target === e.currentTarget) closeModal();
+document.getElementById('item-panel-close')?.addEventListener('click', () => closeItemPanel());
+document.getElementById('item-panel-overlay')?.addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) closeItemPanel();
 });
 
-// Close modal on Escape key
+// Close panel (and legacy modal) on Escape key
 document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeModal();
+    if (e.key === 'Escape') closeItemPanel();
 });
 
 // Toast
@@ -1458,7 +1858,7 @@ async function submitNote(applicationId) {
     try {
         await addNote(applicationId, noteText);
         // Reload the application view to show the new note
-        viewApplication(applicationId);
+        viewApplication(applicationId, { activeTab: 'notes' });
     } catch (error) {
         // Error already shown
     }
@@ -1530,14 +1930,17 @@ async function deleteApplication(id) {
 // Expose functions to global scope
 window.viewApplication = viewApplication;
 window.updateApplicationStatus = updateApplicationStatus;
+window.updateMemberOnboardingStatus = updateMemberOnboardingStatus;
 window.convertApplication = convertApplication;
 window.viewMember = viewMember;
 window.viewTeamMember = viewTeamMember;
 window.viewSubmission = viewSubmission;
 window.changePage = changePage;
 window.closeModal = closeModal;
+window.setActivePanelTab = setActivePanelTab;
 window.refreshStats = refreshStats;
 window.toggleKebabMenu = toggleKebabMenu;
+window.toggleApplicationsGroup = toggleApplicationsGroup;
 window.markSubmissionComplete = markSubmissionComplete;
 window.deleteSubmission = deleteSubmission;
 window.deleteMember = deleteMember;
@@ -1549,40 +1952,16 @@ window.submitInlineNote = submitInlineNote;
 
 // Open notes panel inline
 async function openNotesPanel(applicationId, applicantName) {
-    try {
-        const notes = await loadNotes(applicationId);
-
-        const notesList = notes.length > 0
-            ? notes.map(note => `
-                <div class="note-item" data-note-id="${note.id}">
-                    <div class="note-meta">
-                        <span class="note-author">${note.created_by}</span>
-                        <span>${formatTimeAgo(note.created_at)} ${note.slack_synced ? '<span class="slack-synced">Synced to Slack</span>' : ''}</span>
-                    </div>
-                    <div class="note-text">${escapeHtml(note.note_text)}</div>
-                </div>
-            `).join('')
-            : '<p style="color: var(--gray-400); font-size: 0.9rem; margin: 8px 0;">No notes yet</p>';
-
-        openModal(`Notes - ${applicantName}`, `
-            <div class="notes-panel">
-                <div class="notes-list" style="max-height: 300px; overflow-y: auto; margin-bottom: 16px;">
-                    ${notesList}
-                </div>
-                <div class="add-note-form">
-                    <textarea id="inline-note-text" placeholder="Add a note..." style="width: 100%; min-height: 80px; padding: 12px; border: 1px solid var(--gray-300); border-radius: 8px; font-family: inherit; font-size: 0.9rem; resize: vertical;"></textarea>
-                    <button class="btn btn-primary btn-sm" style="margin-top: 8px;" onclick="submitInlineNote('${applicationId}', '${escapeHtml(applicantName)}')">Add Note</button>
-                </div>
-            </div>
-        `);
-    } catch (error) {
-        showToast('Failed to load notes', 'error');
-    }
+    viewApplication(applicationId, { activeTab: 'notes' });
 }
 
 // Submit note from inline panel
 async function submitInlineNote(applicationId, applicantName) {
-    const textarea = document.getElementById('inline-note-text');
+    const textarea = document.getElementById('inline-note-text') || document.getElementById('new-note-text');
+    if (!textarea) {
+        showToast('Note input not found', 'error');
+        return;
+    }
     const noteText = textarea.value.trim();
 
     if (!noteText) {
@@ -1592,8 +1971,8 @@ async function submitInlineNote(applicationId, applicantName) {
 
     try {
         await addNote(applicationId, noteText);
-        // Reload both the notes panel and the applications list
-        openNotesPanel(applicationId, applicantName);
+        // Reload the application panel (notes tab) and the applications list
+        viewApplication(applicationId, { activeTab: 'notes' });
         loadApplications();
     } catch (error) {
         // Error already shown
