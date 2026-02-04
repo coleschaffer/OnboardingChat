@@ -159,7 +159,9 @@ async function findZapierMessage(email, channelId = CA_PRO_CHANNEL_ID) {
 async function postMessage(channelId, text, blocks = null, threadTs = null) {
     const body = {
         channel: channelId,
-        text: text
+        text: text,
+        unfurl_links: false,
+        unfurl_media: false
     };
 
     if (blocks) {

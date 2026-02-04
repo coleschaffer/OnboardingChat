@@ -18,12 +18,13 @@ router.get('/', async (req, res) => {
         CASE
           WHEN ta.onboarding_completed_at IS NOT NULL THEN 'onboarding_complete'
           WHEN ta.onboarding_started_at IS NOT NULL THEN 'onboarding_started'
+          WHEN ta.purchased_at IS NOT NULL THEN 'purchased'
           WHEN ta.call_booked_at IS NOT NULL THEN 'call_booked'
           WHEN ta.replied_at IS NOT NULL THEN 'replied'
           WHEN ta.emailed_at IS NOT NULL THEN 'emailed'
           ELSE 'new'
         END as display_status,
-        COALESCE(ta.onboarding_completed_at, ta.onboarding_started_at, ta.call_booked_at, ta.replied_at, ta.emailed_at) as status_timestamp
+        COALESCE(ta.onboarding_completed_at, ta.onboarding_started_at, ta.purchased_at, ta.call_booked_at, ta.replied_at, ta.emailed_at) as status_timestamp
       FROM typeform_applications ta
       WHERE 1=1
     `;
@@ -114,12 +115,13 @@ router.get('/:id', async (req, res) => {
         CASE
           WHEN ta.onboarding_completed_at IS NOT NULL THEN 'onboarding_complete'
           WHEN ta.onboarding_started_at IS NOT NULL THEN 'onboarding_started'
+          WHEN ta.purchased_at IS NOT NULL THEN 'purchased'
           WHEN ta.call_booked_at IS NOT NULL THEN 'call_booked'
           WHEN ta.replied_at IS NOT NULL THEN 'replied'
           WHEN ta.emailed_at IS NOT NULL THEN 'emailed'
           ELSE 'new'
         END as display_status,
-        COALESCE(ta.onboarding_completed_at, ta.onboarding_started_at, ta.call_booked_at, ta.replied_at, ta.emailed_at) as status_timestamp
+        COALESCE(ta.onboarding_completed_at, ta.onboarding_started_at, ta.purchased_at, ta.call_booked_at, ta.replied_at, ta.emailed_at) as status_timestamp
       FROM typeform_applications ta
       WHERE ta.id = $1
     `, [id]);

@@ -278,6 +278,18 @@ async function createBusinessOwnerInMonday(pool, orderId, orderData, rawData) {
       }
     }
 
+    // If phone is missing, try to get it from Typeform application
+    if (!orderData.phone && orderData.email) {
+      const typeformResult = await pool.query(
+        'SELECT phone FROM typeform_applications WHERE LOWER(email) = LOWER($1) ORDER BY created_at DESC LIMIT 1',
+        [orderData.email]
+      );
+      if (typeformResult.rows.length > 0 && typeformResult.rows[0].phone) {
+        orderData.phone = typeformResult.rows[0].phone;
+        console.log(`[Monday] Got phone from Typeform: ${orderData.phone}`);
+      }
+    }
+
     // Create the Business Owner in Monday
     const item = await createBusinessOwnerItem(orderData, rawData);
 
@@ -462,12 +474,12 @@ router.post('/samcart', async (req, res) => {
       false  // welcome_sent starts as false
     ]);
 
-    // Try to link to Typeform application by email
+    // Try to link to Typeform application by email - set purchased_at timestamp
     if (orderData.email) {
       await pool.query(`
         UPDATE typeform_applications
-        SET status = 'approved'
-        WHERE LOWER(email) = LOWER($1) AND status = 'new'
+        SET purchased_at = CURRENT_TIMESTAMP
+        WHERE LOWER(email) = LOWER($1) AND purchased_at IS NULL
       `, [orderData.email]);
     }
 

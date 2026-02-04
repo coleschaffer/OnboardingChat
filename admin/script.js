@@ -916,9 +916,14 @@ async function loadOnboarding() {
                 const statusClass = isComplete ? 'completed' : 'pending';
                 const statusText = isComplete ? 'Complete' : 'Incomplete';
 
+                // Show name if matched to business owner, otherwise show session ID
+                const memberName = [sub.first_name, sub.last_name].filter(Boolean).join(' ');
+                const displayName = memberName || sessionShort;
+                const displayTitle = memberName ? `${memberName} (${sub.session_id || ''})` : (sub.session_id || '');
+
                 return `
                 <tr>
-                    <td title="${sub.session_id || ''}">${sessionShort}</td>
+                    <td title="${displayTitle}">${displayName}</td>
                     <td>
                         <div style="display: flex; align-items: center; gap: 8px;">
                             <div style="flex: 1; height: 8px; background: var(--gray-200); border-radius: 4px; overflow: hidden;">
@@ -1296,6 +1301,7 @@ function formatDisplayStatus(status, timestamp) {
         'emailed': 'Emailed',
         'replied': 'Replied',
         'call_booked': 'Call Booked',
+        'purchased': 'Purchased',
         'onboarding_started': 'Onboarding Started',
         'onboarding_complete': 'Onboarding Complete'
     };

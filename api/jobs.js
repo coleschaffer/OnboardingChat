@@ -700,14 +700,14 @@ router.post('/process-email-replies', async (req, res) => {
     const pool = req.app.locals.pool;
     console.log('Checking for email replies...');
 
-    // Get all email threads that don't have a reply yet
+    // Get all email threads to check for new replies
+    // Includes both threads with no replies yet AND threads that already have replies (for multi-reply detection)
     const threadsResult = await pool.query(`
       SELECT et.*, ta.first_name, ta.last_name
       FROM email_threads et
       LEFT JOIN typeform_applications ta ON et.typeform_application_id = ta.id
-      WHERE et.has_reply = false
-        AND et.gmail_thread_id IS NOT NULL
-        AND et.status = 'sent'
+      WHERE et.gmail_thread_id IS NOT NULL
+        AND et.status IN ('sent', 'replied')
       ORDER BY et.created_at ASC
       LIMIT 50
     `);
@@ -727,9 +727,14 @@ router.post('/process-email-replies', async (req, res) => {
           thread.gmail_message_id
         );
 
-        if (replyCheck.hasReply) {
-          results.replies_found++;
-          console.log(`Reply found for ${thread.recipient_email}`);
+        // Check if there are new replies (more than we've seen before)
+        const previousReplyCount = thread.reply_count || 0;
+        const hasNewReplies = replyCheck.hasReply && replyCheck.replyCount > previousReplyCount;
+
+        if (hasNewReplies) {
+          const newReplyCount = replyCheck.replyCount - previousReplyCount;
+          results.replies_found += newReplyCount;
+          console.log(`${newReplyCount} new reply(s) found for ${thread.recipient_email} (total: ${replyCheck.replyCount})`);
 
           // Update email_threads record
           await pool.query(`
@@ -763,7 +768,8 @@ router.post('/process-email-replies', async (req, res) => {
           `, ['email_reply_received', 'typeform_application', thread.typeform_application_id, JSON.stringify({
             email: thread.recipient_email,
             gmail_thread_id: thread.gmail_thread_id,
-            reply_snippet: replyCheck.latestReply?.snippet?.substring(0, 100)
+            reply_snippet: replyCheck.latestReply?.snippet?.substring(0, 100),
+            reply_count: replyCheck.replyCount
           })]);
 
           // Post notification to Slack thread

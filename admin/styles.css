@@ -548,6 +548,7 @@ body {
 .status-badge.emailed { background: #dbeafe; color: #1d4ed8; }
 .status-badge.replied { background: #fef3c7; color: #92400e; }
 .status-badge.call_booked { background: #d1fae5; color: #065f46; }
+.status-badge.purchased { background: #ccfbf1; color: #0d9488; }
 .status-badge.onboarding_started { background: #e9d5ff; color: #6b21a8; }
 .status-badge.onboarding_complete { background: #d1fae5; color: #065f46; }
 .status-badge.onboarding_complete::after { content: ' '; }
