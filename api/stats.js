@@ -11,10 +11,12 @@ router.get('/', async (req, res) => {
     const teamMembersCount = await pool.query('SELECT COUNT(*) FROM team_members');
     const applicationsCount = await pool.query('SELECT COUNT(*) FROM typeform_applications');
 
-    // Get pending onboardings
-    const pendingOnboardings = await pool.query(
-      "SELECT COUNT(*) FROM business_owners WHERE onboarding_status != 'completed'"
-    );
+    // Get completed onboardings (Typeform applications with onboarding_complete or purchased status)
+    const completedOnboardings = await pool.query(`
+      SELECT COUNT(*) FROM typeform_applications
+      WHERE onboarding_completed_at IS NOT NULL
+         OR LOWER(email) IN (SELECT LOWER(email) FROM samcart_orders WHERE status = 'completed')
+    `);
 
     // Get new applications in last 7 days
     const recentApplications = await pool.query(
@@ -87,7 +89,7 @@ router.get('/', async (req, res) => {
         members: parseInt(membersCount.rows[0].count),
         team_members: parseInt(teamMembersCount.rows[0].count),
         applications: parseInt(applicationsCount.rows[0].count),
-        pending_onboardings: parseInt(pendingOnboardings.rows[0].count),
+        pending_onboardings: parseInt(completedOnboardings.rows[0].count),
         recent_applications: parseInt(recentApplications.rows[0].count)
       },
       onboarding_status: onboardingStatus.rows.reduce((acc, row) => {

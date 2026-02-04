@@ -234,26 +234,53 @@ function renderActivityFeed(activities) {
 }
 
 function getActivityIcon(action) {
-    if (action.includes('created') || action.includes('new')) return 'new';
-    if (action.includes('import')) return 'import';
-    if (action.includes('circle') || action.includes('activecampaign') || action.includes('monday')) return 'sync';
+    if (action.includes('slack')) return 'slack';
+    if (action.includes('monday')) return 'sync';
+    if (action.includes('payment') || action.includes('samcart')) return 'payment';
     if (action.includes('email')) return 'email';
     if (action.includes('call_booked')) return 'call';
     if (action.includes('note')) return 'note';
-    if (action.includes('slack')) return 'slack';
+    if (action.includes('circle') || action.includes('activecampaign')) return 'sync';
+    if (action.includes('import')) return 'import';
+    if (action.includes('created') || action.includes('new')) return 'new';
+    if (action.includes('updated') || action.includes('completed')) return 'update';
     return 'update';
 }
 
 function getActivitySVG(action) {
+    // Slack - chat bubble
+    if (action.includes('slack')) {
+        return '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>';
+    }
+    // Monday/sync - refresh arrows
+    if (action.includes('monday') || action.includes('circle') || action.includes('activecampaign')) {
+        return '<path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>';
+    }
+    // Payment - credit card
+    if (action.includes('payment') || action.includes('samcart')) {
+        return '<rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/>';
+    }
+    // Email - envelope
+    if (action.includes('email')) {
+        return '<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>';
+    }
+    // Call booked - calendar
+    if (action.includes('call_booked')) {
+        return '<rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>';
+    }
+    // Note - pencil/edit
+    if (action.includes('note')) {
+        return '<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>';
+    }
+    // New/created - plus
     if (action.includes('created') || action.includes('new')) {
         return '<path d="M12 5v14M5 12h14"/>';
     }
+    // Import - upload
     if (action.includes('import')) {
         return '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>';
     }
-    if (action.includes('circle') || action.includes('activecampaign') || action.includes('monday')) {
-        return '<path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>';
-    }
+    // Default - edit pencil
     return '<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>';
 }
 
@@ -279,47 +306,57 @@ function formatActivityText(activity) {
         case 'new_payment':
         case 'samcart_order':
             const amount = details.amount ? `$${details.amount}` : '';
-            return `💳 Payment received: <strong>${details.name || 'Unknown'}</strong> ${amount ? `- ${amount}` : ''} ${details.product ? `(${details.product})` : ''}`;
+            return `Payment received: <strong>${details.name || 'Unknown'}</strong> ${amount ? `- ${amount}` : ''} ${details.product ? `(${details.product})` : ''}`;
         case 'record_matched':
-            return `🔗 Records matched: <strong>${details.typeform_name || 'Typeform'}</strong> → <strong>${details.onboarding_name || 'Onboarding'}</strong>`;
+            return `Records matched: <strong>${details.typeform_name || 'Typeform'}</strong> → <strong>${details.onboarding_name || 'Onboarding'}</strong>`;
         case 'delayed_welcome_sent':
-            return `⏰ Delayed welcome sent: <strong>${details.name || 'Unknown'}</strong> (${details.reason || 'OnboardingChat not completed'})`;
+            return `Delayed welcome sent: <strong>${details.name || 'Unknown'}</strong> (${details.reason || 'OnboardingChat not completed'})`;
         case 'circle_team_member_synced':
-            return `🔵 Circle: ${details.count || 1} team member(s) synced to communities`;
+            return `Circle: ${details.count || 1} team member(s) synced to communities`;
         case 'circle_partner_synced':
-            return `🔵 Circle: ${details.count || 1} partner(s) synced to communities`;
+            return `Circle: ${details.count || 1} partner(s) synced to communities`;
         case 'circle_sync_failed':
-            return `❌ Circle sync failed: ${details.errors?.length || 1} error(s) for ${details.type || 'contacts'}`;
+            return `Circle sync failed: ${details.errors?.length || 1} error(s) for ${details.type || 'contacts'}`;
         case 'activecampaign_team_member_synced':
-            return `📧 ActiveCampaign: ${details.count || 1} team member(s) synced`;
+            return `ActiveCampaign: ${details.count || 1} team member(s) synced`;
         case 'activecampaign_partner_synced':
-            return `📧 ActiveCampaign: ${details.count || 1} partner(s) synced`;
+            return `ActiveCampaign: ${details.count || 1} partner(s) synced`;
         case 'activecampaign_sync_failed':
-            return `❌ ActiveCampaign sync failed: <strong>${details.email || 'Unknown'}</strong>`;
+            return `ActiveCampaign sync failed: <strong>${details.email || 'Unknown'}</strong>`;
         case 'monday_team_member_synced':
-            return `📊 Monday: ${details.count || 1} team member(s) added to PRO Team Members board`;
+            return `Monday: ${details.count || 1} team member(s) added to PRO Team Members board`;
         case 'monday_partner_synced':
-            return `📊 Monday: ${details.count || 1} partner(s) added as subitems`;
+            return `Monday: ${details.count || 1} partner(s) added as subitems`;
         case 'monday_sync_failed':
-            return `❌ Monday sync failed: ${details.errors?.length || 1} error(s)`;
+            return `Monday sync failed: ${details.errors?.length || 1} error(s)`;
         case 'email_sent':
-            return `📧 Email sent to <strong>${details.email || 'Unknown'}</strong>`;
+            return `Email sent to <strong>${details.email || 'Unknown'}</strong>`;
         case 'email_send_failed':
-            return `❌ Email failed to <strong>${details.email || 'Unknown'}</strong>: ${details.error || 'Error'}`;
+            return `Email failed to <strong>${details.email || 'Unknown'}</strong>: ${details.error || 'Error'}`;
         case 'email_reply_received':
-            return `💬 Email reply from <strong>${details.email || 'Unknown'}</strong>`;
+            return `Email reply from <strong>${details.email || 'Unknown'}</strong>`;
         case 'email_reply_sent':
-            return `📤 Email reply sent to <strong>${details.email || 'Unknown'}</strong>`;
+            return `Email reply sent to <strong>${details.email || 'Unknown'}</strong>`;
         case 'call_booked':
-            return `📅 Call booked: <strong>${details.email || 'Unknown'}</strong>`;
+            return `Call booked: <strong>${details.email || 'Unknown'}</strong>`;
         case 'note_added':
-            return `📝 Note added by <strong>${details.created_by || 'admin'}</strong>`;
+            return `Note added by <strong>${details.created_by || 'admin'}</strong>`;
         case 'slack_thread_created':
-            return `💬 Slack thread created for <strong>${details.email || 'Unknown'}</strong>`;
+            return `Slack thread created for <strong>${details.email || 'Unknown'}</strong>`;
         case 'onboarding_started':
-            return `🚀 Onboarding started: <strong>${details.email || 'Unknown'}</strong>`;
+            return `Onboarding started: <strong>${details.email || 'Unknown'}</strong>`;
         case 'onboarding_completed':
-            return `✅ Onboarding completed: <strong>${details.email || details.business_name || 'Unknown'}</strong>`;
+            return `Onboarding completed: <strong>${details.business_name || details.email || 'Unknown'}</strong>`;
+        case 'slack_welcome_updated':
+            return `Welcome message updated: <strong>${details.business_name || details.email || 'Unknown'}</strong>`;
+        case 'slack_onboarding_update_posted':
+            return `Onboarding update posted: <strong>${details.business_name || details.email || 'Unknown'}</strong>`;
+        case 'monday_company_updated':
+            return `Monday company updated: <strong>${details.business_name || details.email || 'Unknown'}</strong>`;
+        case 'monday_business_owner_created':
+            return `Monday: New Business Owner added: <strong>${details.name || details.email || 'Unknown'}</strong>`;
+        case 'monday_business_owner_created_retry':
+            return `Monday: Business Owner added (retry): <strong>${details.name || details.email || 'Unknown'}</strong>`;
         default:
             return activity.action.replace(/_/g, ' ');
     }
@@ -356,7 +393,7 @@ function renderStatusChart(status) {
 // Applications
 async function loadApplications() {
     const tbody = document.getElementById('applications-tbody');
-    tbody.innerHTML = '<tr><td colspan="6" class="loading">Loading...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="loading">Loading...</td></tr>';
 
     try {
         const search = document.getElementById('applications-search')?.value || '';
@@ -372,12 +409,13 @@ async function loadApplications() {
         const data = await fetchAPI(`/applications?${params}`);
 
         if (data.applications.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="6" class="loading">No applications found</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="7" class="loading">No applications found</td></tr>';
         } else {
             tbody.innerHTML = data.applications.map(app => {
                 // Use computed display_status from API
                 const displayStatus = app.display_status || 'new';
                 const statusInfo = formatDisplayStatus(displayStatus, app.status_timestamp);
+                const noteCount = app.note_count || 0;
 
                 return `
                 <tr>
@@ -389,6 +427,15 @@ async function loadApplications() {
                             <span class="status-badge ${displayStatus}">${statusInfo.text}</span>
                             ${statusInfo.time ? `<span class="status-time">${statusInfo.time}</span>` : ''}
                         </div>
+                    </td>
+                    <td>
+                        <button class="notes-btn ${noteCount > 0 ? 'has-notes' : ''}" onclick="openNotesPanel('${app.id}', '${escapeHtml((app.first_name || '') + ' ' + (app.last_name || ''))}')" title="${noteCount > 0 ? noteCount + ' note(s)' : 'Add note'}">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                            </svg>
+                            ${noteCount > 0 ? `<span class="note-count">${noteCount}</span>` : ''}
+                        </button>
                     </td>
                     <td>${formatDate(app.created_at)}</td>
                     <td>
@@ -425,7 +472,7 @@ async function loadApplications() {
         renderPagination('applications', data.total, applicationsPage);
     } catch (error) {
         console.error('Error loading applications:', error);
-        tbody.innerHTML = '<tr><td colspan="6" class="loading">Error loading applications</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="loading">Error loading applications</td></tr>';
     }
 }
 
@@ -995,6 +1042,7 @@ async function viewSubmission(id) {
 function toggleKebabMenu(event, id) {
     event.stopPropagation();
     const dropdown = document.getElementById(`kebab-${id}`);
+    const button = event.currentTarget;
     const isActive = dropdown.classList.contains('active');
 
     // Close all other menus
@@ -1002,6 +1050,11 @@ function toggleKebabMenu(event, id) {
 
     // Toggle this menu
     if (!isActive) {
+        // Position the dropdown using fixed positioning
+        const rect = button.getBoundingClientRect();
+        dropdown.style.top = `${rect.bottom + 4}px`;
+        dropdown.style.right = `${window.innerWidth - rect.right}px`;
+        dropdown.style.left = 'auto';
         dropdown.classList.add('active');
     }
 }
@@ -1487,3 +1540,58 @@ window.deleteMember = deleteMember;
 window.deleteTeamMember = deleteTeamMember;
 window.deleteApplication = deleteApplication;
 window.submitNote = submitNote;
+window.openNotesPanel = openNotesPanel;
+window.submitInlineNote = submitInlineNote;
+
+// Open notes panel inline
+async function openNotesPanel(applicationId, applicantName) {
+    try {
+        const notes = await loadNotes(applicationId);
+
+        const notesList = notes.length > 0
+            ? notes.map(note => `
+                <div class="note-item" data-note-id="${note.id}">
+                    <div class="note-meta">
+                        <span class="note-author">${note.created_by}</span>
+                        <span>${formatTimeAgo(note.created_at)} ${note.slack_synced ? '<span class="slack-synced">Synced to Slack</span>' : ''}</span>
+                    </div>
+                    <div class="note-text">${escapeHtml(note.note_text)}</div>
+                </div>
+            `).join('')
+            : '<p style="color: var(--gray-400); font-size: 0.9rem; margin: 8px 0;">No notes yet</p>';
+
+        openModal(`Notes - ${applicantName}`, `
+            <div class="notes-panel">
+                <div class="notes-list" style="max-height: 300px; overflow-y: auto; margin-bottom: 16px;">
+                    ${notesList}
+                </div>
+                <div class="add-note-form">
+                    <textarea id="inline-note-text" placeholder="Add a note..." style="width: 100%; min-height: 80px; padding: 12px; border: 1px solid var(--gray-300); border-radius: 8px; font-family: inherit; font-size: 0.9rem; resize: vertical;"></textarea>
+                    <button class="btn btn-primary btn-sm" style="margin-top: 8px;" onclick="submitInlineNote('${applicationId}', '${escapeHtml(applicantName)}')">Add Note</button>
+                </div>
+            </div>
+        `);
+    } catch (error) {
+        showToast('Failed to load notes', 'error');
+    }
+}
+
+// Submit note from inline panel
+async function submitInlineNote(applicationId, applicantName) {
+    const textarea = document.getElementById('inline-note-text');
+    const noteText = textarea.value.trim();
+
+    if (!noteText) {
+        showToast('Please enter a note', 'error');
+        return;
+    }
+
+    try {
+        await addNote(applicationId, noteText);
+        // Reload both the notes panel and the applications list
+        openNotesPanel(applicationId, applicantName);
+        loadApplications();
+    } catch (error) {
+        // Error already shown
+    }
+}

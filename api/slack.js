@@ -658,6 +658,7 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
 router.post('/events', verifySlackSignature, async (req, res) => {
     try {
         const payload = req.body;
+        const pool = req.app.locals.pool;
 
         // Handle URL verification
         if (payload.type === 'url_verification') {
@@ -682,7 +683,7 @@ router.post('/events', verifySlackSignature, async (req, res) => {
 
             console.log(`[Slack Events] Thread reply in ${channelId}, thread ${threadTs}: "${editRequest?.substring(0, 50)}..."`);
 
-            // Get the full thread to find the welcome message with metadata
+            // Get the full thread to find the welcome message
             const historyResponse = await fetch(`https://slack.com/api/conversations.replies?channel=${channelId}&ts=${threadTs}&include_all_metadata=true`, {
                 headers: {
                     'Authorization': `Bearer ${SLACK_BOT_TOKEN}`
@@ -695,54 +696,151 @@ router.post('/events', verifySlackSignature, async (req, res) => {
                 return;
             }
 
-            // Find the MOST RECENT welcome message from the bot (for iterative editing)
-            // We need to get the last edited version, not the original
-            let latestWelcome = null;
+            // Try to get member data from multiple sources
             let memberData = {};
 
-            // First, get member data from the original welcome message with metadata
-            for (const msg of historyData.messages) {
-                const hasWelcomeMetadata = msg.metadata?.event_type === 'welcome_message';
-                if (hasWelcomeMetadata && msg.metadata?.event_payload) {
-                    memberData = msg.metadata.event_payload;
-                    break;
+            // 1. First check if this is a SamCart order thread (for #notifications-capro welcome messages)
+            const orderResult = await pool.query(`
+                SELECT so.*, bo.first_name, bo.last_name, bo.business_name, bo.bio,
+                       bo.annual_revenue, bo.team_count, bo.traffic_sources, bo.landing_pages,
+                       bo.ai_skill_level, bo.massive_win, bo.pain_point
+                FROM samcart_orders so
+                LEFT JOIN business_owners bo ON LOWER(bo.email) = LOWER(so.email)
+                WHERE so.slack_thread_ts = $1 AND so.slack_channel_id = $2
+                LIMIT 1
+            `, [threadTs, channelId]);
+
+            if (orderResult.rows.length > 0) {
+                const order = orderResult.rows[0];
+                console.log(`[Slack Events] Found SamCart order for thread: ${order.email}`);
+
+                // Also get Typeform data if available
+                const typeformResult = await pool.query(
+                    'SELECT * FROM typeform_applications WHERE LOWER(email) = LOWER($1) ORDER BY created_at DESC LIMIT 1',
+                    [order.email]
+                );
+                const typeformData = typeformResult.rows[0] || {};
+
+                // Also get onboarding data if available
+                const onboardingResult = await pool.query(`
+                    SELECT os.data FROM onboarding_submissions os
+                    JOIN business_owners bo ON os.business_owner_id = bo.id
+                    WHERE LOWER(bo.email) = LOWER($1)
+                    ORDER BY os.created_at DESC LIMIT 1
+                `, [order.email]);
+                const onboardingData = onboardingResult.rows[0]?.data || {};
+
+                // Build comprehensive member data from all sources
+                memberData = {
+                    firstName: order.first_name || typeformData.first_name || onboardingData.firstName || '',
+                    lastName: order.last_name || typeformData.last_name || onboardingData.lastName || '',
+                    email: order.email || '',
+                    phone: typeformData.phone || onboardingData.phone || '',
+                    businessName: order.business_name || onboardingData.businessName || '',
+                    businessOverview: order.bio || onboardingData.bio || '',
+                    massiveWin: order.massive_win || onboardingData.massiveWin || '',
+                    teamCount: order.team_count || onboardingData.teamCount || '',
+                    trafficSources: order.traffic_sources || onboardingData.trafficSources || '',
+                    landingPages: order.landing_pages || onboardingData.landingPages || '',
+                    aiSkillLevel: order.ai_skill_level || onboardingData.aiSkillLevel || '',
+                    bio: order.bio || onboardingData.bio || '',
+                    // Typeform-specific fields
+                    typeformBusinessDescription: typeformData.business_description || '',
+                    typeformAnnualRevenue: typeformData.annual_revenue || order.annual_revenue || '',
+                    typeformRevenueTrend: typeformData.revenue_trend || '',
+                    typeformMainChallenge: typeformData.main_challenge || '',
+                    typeformWhyCaPro: typeformData.why_ca_pro || '',
+                    typeformContactPreference: typeformData.contact_preference || '',
+                    typeformInvestmentReadiness: typeformData.investment_readiness || '',
+                    typeformDecisionTimeline: typeformData.decision_timeline || '',
+                    typeformHasTeam: typeformData.has_team || '',
+                    typeformAnythingElse: typeformData.anything_else || typeformData.additional_info || '',
+                    typeformReferralSource: typeformData.referral_source || ''
+                };
+            } else {
+                // 2. Fallback: Try to get member data from message metadata (original welcome message flow)
+                for (const msg of historyData.messages) {
+                    const hasWelcomeMetadata = msg.metadata?.event_type === 'welcome_message';
+                    if (hasWelcomeMetadata && msg.metadata?.event_payload) {
+                        memberData = msg.metadata.event_payload;
+                        console.log('[Slack Events] Found member data from message metadata');
+                        break;
+                    }
                 }
             }
 
-            // Now find the LAST bot message with a welcome (iterate in reverse order)
-            // This ensures we edit the most recently generated version
+            // Find the MOST RECENT welcome message from the bot (for iterative editing)
+            // We need to get the last edited version, not the original
+            let latestWelcome = null;
+
+            // Iterate in reverse to find the last bot message with welcome content
             for (let i = historyData.messages.length - 1; i >= 0; i--) {
                 const msg = historyData.messages[i];
 
                 // Skip user messages (only look at bot messages)
                 if (!msg.bot_id && msg.user !== 'USLACKBOT') continue;
 
-                // Check if this is a welcome message (has section with text)
+                // Check if this is a welcome message (has section with text that looks like a welcome)
                 const sectionBlock = msg.blocks?.find(b => b.type === 'section' && b.text?.text);
                 if (sectionBlock) {
-                    // Skip if this is just a "Note" or other non-welcome message
                     const text = sectionBlock.text.text;
-                    if (text.includes('⚠️') || text.includes('Note:')) continue;
 
-                    // This is likely a welcome message
+                    // Skip non-welcome messages (system notes, notifications, etc.)
+                    if (text.includes('⚠️') ||
+                        text.includes('Note:') ||
+                        text.includes('Email sent') ||
+                        text.includes('Call booked') ||
+                        text.includes('WhatsApp') ||
+                        text.includes('replied') ||
+                        text.length < 100) continue;
+
+                    // This is likely a welcome message (long text with welcome content)
                     latestWelcome = text;
-                    console.log(`[Slack] Found latest welcome message (message ${i + 1} of ${historyData.messages.length})`);
+                    console.log(`[Slack Events] Found latest welcome message (message ${i + 1} of ${historyData.messages.length})`);
                     break;
                 }
             }
 
+            // If still not found, check the header for "Welcome Message" indicator
             if (!latestWelcome) {
-                // Fallback: try the parent message section
-                const parentMessage = historyData.messages[0];
-                latestWelcome = parentMessage?.blocks?.find(b => b.type === 'section')?.text?.text;
+                for (let i = historyData.messages.length - 1; i >= 0; i--) {
+                    const msg = historyData.messages[i];
+                    if (!msg.bot_id && msg.user !== 'USLACKBOT') continue;
 
-                if (!latestWelcome) {
-                    console.error('Could not find any welcome message in thread');
-                    return;
+                    const hasWelcomeHeader = msg.blocks?.find(b =>
+                        b.type === 'header' &&
+                        b.text?.text?.toLowerCase().includes('welcome')
+                    );
+                    if (hasWelcomeHeader) {
+                        const sectionBlock = msg.blocks?.find(b => b.type === 'section' && b.text?.text);
+                        if (sectionBlock) {
+                            latestWelcome = sectionBlock.text.text;
+                            console.log(`[Slack Events] Found welcome message by header (message ${i + 1})`);
+                            break;
+                        }
+                    }
                 }
             }
 
-            console.log('[Slack Events] Editing welcome message with context:', Object.keys(memberData).length, 'fields');
+            if (!latestWelcome) {
+                console.error('[Slack Events] Could not find any welcome message in thread');
+                // Post a helpful message back
+                await fetch('https://slack.com/api/chat.postMessage', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${SLACK_BOT_TOKEN}`
+                    },
+                    body: JSON.stringify({
+                        channel: channelId,
+                        thread_ts: threadTs,
+                        text: "I couldn't find a welcome message to edit in this thread. Make sure there's a generated welcome message above before requesting edits."
+                    })
+                });
+                return;
+            }
+
+            console.log('[Slack Events] Editing welcome message with context:', Object.keys(memberData).filter(k => memberData[k]).length, 'fields');
             console.log('[Slack Events] Edit request:', editRequest);
 
             // Generate edited message with full member context
@@ -752,6 +850,18 @@ router.post('/events', verifySlackSignature, async (req, res) => {
                 console.log('[Slack Events] Claude returned edited message');
             } catch (claudeError) {
                 console.error('[Slack Events] Claude API error:', claudeError.message);
+                await fetch('https://slack.com/api/chat.postMessage', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${SLACK_BOT_TOKEN}`
+                    },
+                    body: JSON.stringify({
+                        channel: channelId,
+                        thread_ts: threadTs,
+                        text: `Sorry, I encountered an error generating the edit: ${claudeError.message}`
+                    })
+                });
                 return;
             }
 
@@ -811,6 +921,8 @@ router.post('/events', verifySlackSignature, async (req, res) => {
                     text: editedMessage
                 })
             });
+
+            console.log('[Slack Events] Posted edited welcome message');
         }
     } catch (error) {
         console.error('Slack event error:', error);

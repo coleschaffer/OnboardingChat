@@ -177,6 +177,33 @@ async function runMigrations() {
       END $$
     `);
 
+    // Add Slack thread columns to samcart_orders (for welcome message editing)
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'samcart_orders' AND column_name = 'slack_channel_id') THEN
+          ALTER TABLE samcart_orders ADD COLUMN slack_channel_id VARCHAR(50);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'samcart_orders' AND column_name = 'slack_thread_ts') THEN
+          ALTER TABLE samcart_orders ADD COLUMN slack_thread_ts VARCHAR(50);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'samcart_orders' AND column_name = 'welcome_note_message_ts') THEN
+          ALTER TABLE samcart_orders ADD COLUMN welcome_note_message_ts VARCHAR(50);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'samcart_orders' AND column_name = 'welcome_message_ts') THEN
+          ALTER TABLE samcart_orders ADD COLUMN welcome_message_ts VARCHAR(50);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'samcart_orders' AND column_name = 'typeform_message_ts') THEN
+          ALTER TABLE samcart_orders ADD COLUMN typeform_message_ts VARCHAR(50);
+        END IF;
+      END $$
+    `);
+
     // Migration 007: Email threads, Slack threading, Calendly, Notes
     // Email threads table
     await pool.query(`

@@ -7,7 +7,7 @@ router.get('/', async (req, res) => {
     const pool = req.app.locals.pool;
     const { status, search, limit = 50, offset = 0 } = req.query;
 
-    // Query applications with computed display_status and has_onboarding flag
+    // Query applications with computed display_status, has_onboarding flag, and note_count
     let query = `
       SELECT ta.*,
         CASE WHEN EXISTS (
@@ -24,7 +24,8 @@ router.get('/', async (req, res) => {
           WHEN ta.emailed_at IS NOT NULL THEN 'emailed'
           ELSE 'new'
         END as display_status,
-        COALESCE(ta.onboarding_completed_at, ta.onboarding_started_at, ta.purchased_at, ta.call_booked_at, ta.replied_at, ta.emailed_at) as status_timestamp
+        COALESCE(ta.onboarding_completed_at, ta.onboarding_started_at, ta.purchased_at, ta.call_booked_at, ta.replied_at, ta.emailed_at) as status_timestamp,
+        (SELECT COUNT(*) FROM application_notes WHERE application_id = ta.id) as note_count
       FROM typeform_applications ta
       WHERE 1=1
     `;

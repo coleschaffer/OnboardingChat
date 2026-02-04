@@ -56,6 +56,13 @@ router.post('/', async (req, res) => {
         const email = (invitee.email || payload.email)?.toLowerCase();
         const name = invitee.name || payload.name;
 
+        // Extract questions and answers (custom Calendly questions)
+        const questionsAndAnswers = invitee.questions_and_answers || [];
+        const meetingNotes = questionsAndAnswers.find(q =>
+            q.question?.toLowerCase().includes('prepare') ||
+            q.question?.toLowerCase().includes('share anything')
+        )?.answer || '';
+
         if (!email) {
             console.log('No email in Calendly invitee');
             return res.json({ received: true, warning: 'no email' });
@@ -66,7 +73,7 @@ router.post('/', async (req, res) => {
         const eventStartTime = scheduledEvent?.start_time;
         const eventName = scheduledEvent?.name;
 
-        // Format event time for display
+        // Format event time for display (in EST)
         let eventTimeDisplay = '';
         if (eventStartTime) {
             const eventDate = new Date(eventStartTime);
@@ -76,6 +83,7 @@ router.post('/', async (req, res) => {
                 day: 'numeric',
                 hour: 'numeric',
                 minute: '2-digit',
+                timeZone: 'America/New_York',
                 timeZoneName: 'short'
             });
         }
@@ -196,7 +204,8 @@ router.post('/', async (req, res) => {
                 application.id,
                 applicantName,
                 email,
-                eventTimeDisplay
+                eventTimeDisplay,
+                meetingNotes
             );
             console.log(`Posted call booked notification for ${email}`);
         } catch (slackError) {

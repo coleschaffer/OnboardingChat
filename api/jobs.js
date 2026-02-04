@@ -97,6 +97,7 @@ Guidelines:
 - Start with "Hey guys" or "Hey everyone" and extend a warm welcome
 - Use their actual name - use first name naturally throughout
 - Describe what they do / their business in 1-2 sentences - make it sound interesting
+- NEVER include the business name (company name) in the welcome message - just describe what they do
 - If they have notable experience or achievements, mention them
 - Mention why they're joining or what they hope to achieve
 - End with a warm welcome using their first name
@@ -202,6 +203,7 @@ async function sendWelcomeThread(samcartOrder, typeformData, pool) {
   }
 
   // Thread message 1: Typeform Data (if available)
+  let typeformMessageTs = null;
   if (typeformData) {
     const typeformFields = [
       `*--- Contact Info ---*`,
@@ -229,7 +231,7 @@ async function sendWelcomeThread(samcartOrder, typeformData, pool) {
       `*Referral Source:* ${typeformData.referral_source || 'N/A'}`
     ];
 
-    await sendMessage([
+    const typeformResponse = await sendMessage([
       {
         type: 'header',
         text: { type: 'plain_text', text: `📝 Typeform Application`, emoji: true }
@@ -239,12 +241,13 @@ async function sendWelcomeThread(samcartOrder, typeformData, pool) {
         text: { type: 'mrkdwn', text: typeformFields.join('\n') }
       }
     ], `Typeform data for ${memberName}`);
+    typeformMessageTs = typeformResponse?.ts;
 
     await new Promise(resolve => setTimeout(resolve, 300));
   }
 
   // Thread message 2: Note about OnboardingChat status
-  await sendMessage([
+  const noteResponse = await sendMessage([
     {
       type: 'section',
       text: { type: 'mrkdwn', text: `⚠️ *Note:* This member has not completed the OnboardingChat yet. The welcome message below is generated from Typeform application data only.` }
@@ -257,7 +260,7 @@ async function sendWelcomeThread(samcartOrder, typeformData, pool) {
   const welcomeMessage = await generateWelcomeMessage(memberData);
   const copyUrl = `${BASE_URL}/copy.html?text=${encodeURIComponent(welcomeMessage)}`;
 
-  await sendMessage([
+  const welcomeResponse = await sendMessage([
     {
       type: 'header',
       text: { type: 'plain_text', text: '✨ Generated Welcome Message', emoji: true }
@@ -288,11 +291,25 @@ async function sendWelcomeThread(samcartOrder, typeformData, pool) {
     }
   ], `Welcome message for ${memberName}`);
 
+  // Store message timestamps for later editing/deletion when onboarding completes
+  if (noteResponse?.ts || welcomeResponse?.ts || typeformMessageTs) {
+    try {
+      await pool.query(`
+        UPDATE samcart_orders
+        SET welcome_note_message_ts = $1, welcome_message_ts = $2, typeform_message_ts = $3
+        WHERE id = $4
+      `, [noteResponse?.ts, welcomeResponse?.ts, typeformMessageTs, samcartOrder.id]);
+    } catch (e) {
+      console.log(`[Welcome] Could not store message timestamps: ${e.message}`);
+    }
+  }
+
   console.log(`[Welcome] Welcome thread sent successfully for ${memberName}`);
   return true;
 }
 
-// Process delayed welcomes - called by Railway cron job
+// Process delayed welcomes - DEPRECATED (welcomes now sent immediately after SamCart purchase)
+// Kept as no-op to prevent breaking existing cron jobs
 router.post('/process-delayed-welcomes', async (req, res) => {
   try {
     // Verify secret key
@@ -309,166 +326,21 @@ router.post('/process-delayed-welcomes', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const pool = req.app.locals.pool;
-    console.log('Processing delayed welcomes...');
+    // No-op: Welcomes are now sent immediately after SamCart purchase
+    // and updated when onboarding completes
+    console.log('[Delayed Welcomes] DEPRECATED - welcomes are now sent immediately');
 
-    // Find SamCart orders created more than 1 hour ago that haven't had welcome sent
-    const pendingOrders = await pool.query(`
-      SELECT * FROM samcart_orders
-      WHERE welcome_sent = false
-        AND created_at < NOW() - INTERVAL '1 hour'
-        AND status = 'completed'
-      ORDER BY created_at ASC
-      LIMIT 10
-    `);
-
-    console.log(`Found ${pendingOrders.rows.length} pending orders to process`);
-
-    const results = {
-      processed: 0,
-      skipped_has_onboarding: 0,
-      skipped_no_typeform: 0,
-      sent: 0,
-      errors: []
-    };
-
-    for (const order of pendingOrders.rows) {
-      try {
-        // Check if this user has completed OnboardingChat
-        // Match by email → phone → name
-        let hasOnboarding = false;
-        let conditions = [];
-        let params = [];
-
-        if (order.email) {
-          conditions.push(`LOWER(bo.email) = LOWER($${params.length + 1})`);
-          params.push(order.email);
-        }
-        if (order.phone) {
-          const cleanPhone = order.phone.replace(/\D/g, '');
-          if (cleanPhone.length >= 10) {
-            conditions.push(`REPLACE(REPLACE(REPLACE(bo.phone, '-', ''), ' ', ''), '+', '') LIKE '%' || $${params.length + 1}`);
-            params.push(cleanPhone.slice(-10));
-          }
-        }
-        if (order.first_name && order.last_name) {
-          conditions.push(`(LOWER(bo.first_name) = LOWER($${params.length + 1}) AND LOWER(bo.last_name) = LOWER($${params.length + 2}))`);
-          params.push(order.first_name, order.last_name);
-        }
-
-        if (conditions.length > 0) {
-          const onboardingResult = await pool.query(`
-            SELECT bo.id FROM business_owners bo
-            WHERE bo.source = 'chat_onboarding'
-              AND bo.onboarding_status = 'completed'
-              AND (${conditions.join(' OR ')})
-            LIMIT 1
-          `, params);
-
-          hasOnboarding = onboardingResult.rows.length > 0;
-        }
-
-        if (hasOnboarding) {
-          // User completed OnboardingChat - mark welcome_sent to prevent future processing
-          // The OnboardingChat flow already sent (or will send) the welcome
-          await pool.query(`
-            UPDATE samcart_orders
-            SET welcome_sent = true, welcome_sent_at = NOW()
-            WHERE id = $1
-          `, [order.id]);
-
-          results.skipped_has_onboarding++;
-          console.log(`Skipped ${order.email} - has OnboardingChat submission`);
-          continue;
-        }
-
-        // Look for Typeform data with same matching strategy
-        let typeformData = null;
-        conditions = [];
-        params = [];
-
-        if (order.email) {
-          conditions.push(`LOWER(email) = LOWER($${params.length + 1})`);
-          params.push(order.email);
-        }
-        if (order.phone) {
-          const cleanPhone = order.phone.replace(/\D/g, '');
-          if (cleanPhone.length >= 10) {
-            conditions.push(`REPLACE(REPLACE(REPLACE(phone, '-', ''), ' ', ''), '+', '') LIKE '%' || $${params.length + 1}`);
-            params.push(cleanPhone.slice(-10));
-          }
-        }
-        if (order.first_name && order.last_name) {
-          conditions.push(`(LOWER(first_name) = LOWER($${params.length + 1}) AND LOWER(last_name) = LOWER($${params.length + 2}))`);
-          params.push(order.first_name, order.last_name);
-        }
-
-        if (conditions.length > 0) {
-          const typeformResult = await pool.query(`
-            SELECT * FROM typeform_applications
-            WHERE ${conditions.join(' OR ')}
-            ORDER BY created_at DESC
-            LIMIT 1
-          `, params);
-
-          if (typeformResult.rows.length > 0) {
-            typeformData = typeformResult.rows[0];
-          }
-        }
-
-        if (!typeformData) {
-          // No Typeform data - skip (can't generate meaningful welcome without application info)
-          results.skipped_no_typeform++;
-          console.log(`Skipped ${order.email} - no Typeform application found`);
-          continue;
-        }
-
-        // Send delayed welcome
-        const sent = await sendDelayedWelcome(order, typeformData, pool);
-
-        if (sent) {
-          // Mark welcome_sent
-          await pool.query(`
-            UPDATE samcart_orders
-            SET welcome_sent = true, welcome_sent_at = NOW()
-            WHERE id = $1
-          `, [order.id]);
-
-          // Log to activity feed
-          await pool.query(`
-            INSERT INTO activity_log (action, entity_type, entity_id, details)
-            VALUES ($1, $2, $3, $4)
-          `, [
-            'delayed_welcome_sent',
-            'samcart_order',
-            order.id,
-            JSON.stringify({
-              email: order.email,
-              name: [order.first_name, order.last_name].filter(Boolean).join(' '),
-              typeform_id: typeformData.id,
-              reason: 'OnboardingChat not completed within 1 hour'
-            })
-          ]);
-
-          results.sent++;
-          console.log(`Sent delayed welcome for ${order.email}`);
-        }
-
-        results.processed++;
-      } catch (error) {
-        console.error(`Error processing order ${order.id}:`, error);
-        results.errors.push({ order_id: order.id, email: order.email, error: error.message });
-      }
-    }
-
-    console.log('Delayed welcome processing complete:', results);
     res.json({
       success: true,
-      ...results
+      deprecated: true,
+      message: 'Delayed welcomes are deprecated. Welcomes are now sent immediately after SamCart purchase.',
+      processed: 0,
+      sent: 0,
+      errors: []
     });
   } catch (error) {
-    console.error('Error processing delayed welcomes:', error);
-    res.status(500).json({ error: 'Failed to process delayed welcomes' });
+    console.error('Error in deprecated delayed welcomes endpoint:', error);
+    res.status(500).json({ error: 'Failed to process' });
   }
 });
 

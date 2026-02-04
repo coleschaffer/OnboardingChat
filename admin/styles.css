@@ -331,6 +331,7 @@ body {
 
 .stat-icon.members { background: var(--primary-orange); }
 .stat-icon.pending { background: var(--yellow); }
+.stat-icon.completed { background: var(--green); }
 .stat-icon.applications { background: var(--blue); }
 .stat-icon.team { background: var(--green); }
 
@@ -412,6 +413,12 @@ body {
 .activity-icon.new { background: var(--green); }
 .activity-icon.update { background: var(--blue); }
 .activity-icon.import { background: var(--primary-orange); }
+.activity-icon.sync { background: var(--blue); }
+.activity-icon.email { background: #8b5cf6; }
+.activity-icon.call { background: var(--green); }
+.activity-icon.note { background: var(--gray-500); }
+.activity-icon.slack { background: #4a154b; }
+.activity-icon.payment { background: var(--green); }
 
 .activity-content {
     flex: 1;
@@ -481,7 +488,7 @@ body {
     background: var(--white);
     border-radius: 12px;
     box-shadow: var(--shadow);
-    overflow: visible;
+    overflow-x: auto;
 }
 
 .table-container .data-table {
@@ -490,7 +497,16 @@ body {
 
 .data-table {
     width: 100%;
+    min-width: 700px;
     border-collapse: collapse;
+    table-layout: fixed;
+}
+
+.data-table th,
+.data-table td {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .data-table th {
@@ -937,16 +953,13 @@ body {
 }
 
 .kebab-dropdown {
-    position: absolute;
-    right: 0;
-    top: 100%;
-    margin-top: 4px;
+    position: fixed;
     background: var(--white);
     border: 1px solid var(--gray-200);
     border-radius: 8px;
     box-shadow: var(--shadow-lg);
     min-width: 160px;
-    z-index: 1000;
+    z-index: 9999;
     display: none;
 }
 
@@ -1233,4 +1246,45 @@ body {
 .status-time {
     font-size: 0.7rem;
     color: var(--gray-500);
+}
+
+/* Notes button in table */
+.notes-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 10px;
+    border: 1px solid var(--gray-300);
+    border-radius: 6px;
+    background: var(--white);
+    color: var(--gray-500);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-size: 0.8rem;
+}
+
+.notes-btn:hover {
+    background: var(--gray-50);
+    border-color: var(--gray-400);
+    color: var(--gray-700);
+}
+
+.notes-btn.has-notes {
+    background: #fef3c7;
+    border-color: #f59e0b;
+    color: #92400e;
+}
+
+.notes-btn.has-notes:hover {
+    background: #fde68a;
+}
+
+.notes-btn svg {
+    width: 14px;
+    height: 14px;
+}
+
+.notes-btn .note-count {
+    font-weight: 600;
+    font-size: 0.75rem;
 }

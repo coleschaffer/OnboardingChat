@@ -624,15 +624,17 @@ router.post('/save-progress', async (req, res) => {
 
     // Check if session exists and get previous data
     const existing = await pool.query(
-      'SELECT id, business_owner_id, data FROM onboarding_submissions WHERE session_id = $1',
+      'SELECT id, business_owner_id, data, is_complete FROM onboarding_submissions WHERE session_id = $1',
       [session]
     );
 
     let submissionId;
     let businessOwnerId = null;
     let previousData = null;
+    let wasAlreadyComplete = false;
 
     if (existing.rows.length > 0) {
+      wasAlreadyComplete = existing.rows[0].is_complete === true;
       // Update existing submission
       submissionId = existing.rows[0].id;
       businessOwnerId = existing.rows[0].business_owner_id;
@@ -729,8 +731,9 @@ router.post('/save-progress', async (req, res) => {
       }
     }
 
-    // If complete, create/update business owner and team members
-    if (isActuallyComplete) {
+    // If complete AND not already processed, create/update business owner and team members
+    // The wasAlreadyComplete check prevents duplicate processing when endpoint is called multiple times
+    if (isActuallyComplete && !wasAlreadyComplete) {
       businessOwnerId = await createOrUpdateBusinessOwner(pool, answers, teamMembers, cLevelPartners, session, submissionId);
 
       // Send Slack welcome message (async, don't wait)
@@ -975,11 +978,8 @@ async function createOrUpdateBusinessOwner(pool, answers, teamMembers, cLevelPar
       }
     }
 
-    // Log activity
-    await client.query(`
-      INSERT INTO activity_log (action, entity_type, entity_id, details)
-      VALUES ($1, $2, $3, $4)
-    `, ['onboarding_completed', 'business_owner', businessOwnerId, JSON.stringify({ business: answers.businessName })]);
+    // Note: onboarding_completed activity is logged in the main save-progress handler
+    // to avoid duplicate log entries
 
     await client.query('COMMIT');
     return businessOwnerId;
