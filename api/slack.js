@@ -2,7 +2,8 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const slackBlocks = require('../lib/slack-blocks');
-const { openModal, postEphemeral } = require('./slack-threads');
+const { openModal, postMessage, deleteMessage } = require('./slack-threads');
+const { gmailService } = require('../lib/gmail');
 
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
@@ -462,8 +463,9 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
             const messageText = payload.view.state.values.message_block.message_input.value;
             const userId = payload.user.id;
 
-            // Insert pending email with 30-second delay
-            const sendAt = new Date(Date.now() + 30000); // 30 seconds from now
+            // Insert pending email with 10-second delay
+            const UNDO_DELAY_MS = 10000; // 10 seconds
+            const sendAt = new Date(Date.now() + UNDO_DELAY_MS);
 
             const result = await pool.query(`
                 INSERT INTO pending_email_sends (
@@ -478,22 +480,26 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
                 privateMetadata.threadId,
                 privateMetadata.applicationId,
                 userId,
-                payload.view.app_id ? '' : '', // We'll get channel from application
+                '', // We'll update with channel from application
                 null, // thread_ts
                 sendAt
             ]);
 
             const pendingEmailId = result.rows[0].id;
 
-            // Get the application's slack thread info for the ephemeral message
+            // Get the application's slack thread info
             const appResult = await pool.query(
                 'SELECT slack_channel_id, slack_thread_ts FROM typeform_applications WHERE id = $1',
                 [privateMetadata.applicationId]
             );
 
+            let sendingMessageTs = null;
+            let channelId = null;
+            let threadTs = null;
+
             if (appResult.rows[0]?.slack_channel_id) {
-                const channelId = appResult.rows[0].slack_channel_id;
-                const threadTs = appResult.rows[0].slack_thread_ts;
+                channelId = appResult.rows[0].slack_channel_id;
+                threadTs = appResult.rows[0].slack_thread_ts;
 
                 // Update the pending email with channel info
                 await pool.query(
@@ -501,21 +507,134 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
                     [channelId, threadTs, pendingEmailId]
                 );
 
-                // Send ephemeral "Sending..." message with Undo button
-                const ephemeralBlock = slackBlocks.createSendingEphemeralBlock(
+                // Post regular "Sending..." message with Undo button (can be deleted later)
+                const sendingBlock = slackBlocks.createSendingEphemeralBlock(
                     privateMetadata.recipientEmail,
                     sendAt.toISOString(),
                     pendingEmailId
                 );
 
-                await postEphemeral(
+                const sendingMsg = await postMessage(
                     channelId,
-                    userId,
-                    ephemeralBlock.text,
-                    ephemeralBlock.blocks,
+                    sendingBlock.text,
+                    sendingBlock.blocks,
                     threadTs
                 );
+                sendingMessageTs = sendingMsg.ts;
+
+                // Store the sending message ts so we can delete it later
+                await pool.query(
+                    'UPDATE pending_email_sends SET sending_message_ts = $1 WHERE id = $2',
+                    [sendingMessageTs, pendingEmailId]
+                );
             }
+
+            // Schedule email send with setTimeout (runs in main service)
+            setTimeout(async () => {
+                try {
+                    // Re-check if the email was cancelled
+                    const pendingCheck = await pool.query(
+                        'SELECT * FROM pending_email_sends WHERE id = $1',
+                        [pendingEmailId]
+                    );
+
+                    const pending = pendingCheck.rows[0];
+                    if (!pending || pending.status !== 'pending') {
+                        console.log(`[Email] Pending email ${pendingEmailId} was cancelled or already processed`);
+                        return;
+                    }
+
+                    // Get the existing thread to reply to
+                    let gmailThreadId = pending.gmail_thread_id;
+                    let messageId = null;
+
+                    if (gmailThreadId) {
+                        try {
+                            const thread = await gmailService.getThread(gmailThreadId);
+                            if (thread.messages && thread.messages.length > 0) {
+                                const lastMessage = thread.messages[thread.messages.length - 1];
+                                messageId = lastMessage.payload.headers.find(h => h.name.toLowerCase() === 'message-id')?.value;
+                            }
+                        } catch (e) {
+                            console.log('[Email] Could not get thread for reply:', e.message);
+                        }
+                    }
+
+                    // Send the email
+                    const subject = pending.subject || 'Re: Thanks for applying to CA Pro';
+                    const emailResult = await gmailService.sendEmail(
+                        pending.to_email,
+                        subject,
+                        pending.body,
+                        gmailThreadId,
+                        messageId
+                    );
+
+                    // Update pending email status
+                    await pool.query(`
+                        UPDATE pending_email_sends SET
+                            status = 'sent',
+                            sent_at = CURRENT_TIMESTAMP,
+                            gmail_thread_id = $1
+                        WHERE id = $2
+                    `, [emailResult.threadId, pendingEmailId]);
+
+                    // Log activity
+                    await pool.query(`
+                        INSERT INTO activity_log (action, entity_type, entity_id, details)
+                        VALUES ($1, $2, $3, $4)
+                    `, ['email_reply_sent', 'typeform_application', pending.typeform_application_id, JSON.stringify({
+                        email: pending.to_email,
+                        gmail_thread_id: emailResult.threadId,
+                        user_id: pending.user_id
+                    })]);
+
+                    // Delete the "Sending..." message and post confirmation
+                    if (pending.channel_id && pending.sending_message_ts) {
+                        try {
+                            await deleteMessage(pending.channel_id, pending.sending_message_ts);
+                        } catch (delErr) {
+                            console.log('[Email] Could not delete sending message:', delErr.message);
+                        }
+                    }
+
+                    // Post confirmation to thread
+                    if (pending.channel_id && pending.thread_ts) {
+                        const confirmBlock = slackBlocks.createEmailSentConfirmationBlock(
+                            pending.to_email,
+                            pending.body
+                        );
+                        await postMessage(
+                            pending.channel_id,
+                            confirmBlock.text,
+                            confirmBlock.blocks,
+                            pending.thread_ts
+                        );
+                    }
+
+                    console.log(`[Email] Sent email to ${pending.to_email} (immediate)`);
+
+                } catch (error) {
+                    console.error(`[Email] Error sending email ${pendingEmailId}:`, error.message);
+
+                    // Mark as failed
+                    await pool.query(`
+                        UPDATE pending_email_sends SET
+                            status = 'failed',
+                            error_message = $1
+                        WHERE id = $2
+                    `, [error.message, pendingEmailId]);
+
+                    // Post error to thread
+                    if (channelId && threadTs) {
+                        const errorBlock = slackBlocks.createEmailFailedBlock(
+                            privateMetadata.recipientEmail,
+                            error.message
+                        );
+                        await postMessage(channelId, errorBlock.text, errorBlock.blocks, threadTs);
+                    }
+                }
+            }, UNDO_DELAY_MS + 1000); // Add 1 second buffer
 
             // Return empty response to close modal
             return res.status(200).send();
