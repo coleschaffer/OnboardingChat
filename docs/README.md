@@ -105,7 +105,8 @@ Endpoint: `POST /api/webhooks/calendly`
 
 ### 4b) Slack `/note` → Application Notes → Admin + Threads
 
-- Command: `/note <text>` (use inside an application thread in `CA_PRO_APPLICATION_SLACK_CHANNEL_ID`)
+- Slack message shortcut (recommended): “Add Note” on a message in the application thread (works in threads; callback_id: `add_application_note`)
+- Slash command (fallback): `/note <email|applicationId> <text>` (Slack does **not** allow custom slash commands to be invoked from thread replies)
 - Creates a row in `application_notes` for the matching `typeform_applications` record.
 - Sync behavior:
   - posts into the application’s Slack thread (best-effort)

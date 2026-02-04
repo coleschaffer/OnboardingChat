@@ -21,9 +21,10 @@ This thread becomes the “source of truth” conversation for:
 - Calendly call booked notifications
 - Admin notes (`application_notes`) sync
   - Notes created in the admin UI sync into this thread.
-  - Slack slash command `/note` can be used inside this thread to create a note and sync it into:
+  - Slack message shortcut “Add Note” (callback_id: `add_application_note`) can be used on a message in this thread to create a note and sync it into:
     - the application thread, and
     - the member’s Purchase/Welcome thread (if one exists)
+  - Slash command fallback: `/note <email|applicationId> <text>` (Slack does **not** allow custom slash commands to be invoked from thread replies)
 
 ### 2) Purchase + welcome threads (SamCart)
 

@@ -10,6 +10,41 @@ const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
 const SLACK_WELCOME_USER_ID = process.env.SLACK_WELCOME_USER_ID || 'U0ABG2G4Q2G';
 
+function looksLikeUuid(value) {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test((value || '').trim());
+}
+
+function looksLikeEmail(value) {
+    return ((value || '').trim()).includes('@');
+}
+
+function extractEmailFromSlackMessage(message) {
+    if (!message) return null;
+
+    const parts = [];
+    if (typeof message.text === 'string') parts.push(message.text);
+
+    if (Array.isArray(message.blocks)) {
+        for (const block of message.blocks) {
+            if (block?.text?.text) parts.push(block.text.text);
+            if (Array.isArray(block?.fields)) {
+                parts.push(...block.fields.map(f => f?.text).filter(Boolean));
+            }
+            if (Array.isArray(block?.elements)) {
+                parts.push(...block.elements.map(el => el?.text || el?.value).filter(Boolean));
+            }
+        }
+    }
+
+    const normalized = parts
+        .join('\n')
+        .replace(/mailto:/gi, '')
+        .replace(/[<>|]/g, ' ');
+
+    const match = normalized.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+    return match?.[0] || null;
+}
+
 // Verify Slack request signature
 function verifySlackSignature(req, res, next) {
     const signature = req.headers['x-slack-signature'];
@@ -279,6 +314,100 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
         // Handle URL verification
         if (payload.type === 'url_verification') {
             return res.json({ challenge: payload.challenge });
+        }
+
+        // Handle message shortcuts (works in threads; slash commands do not)
+        if ((payload.type === 'message_action' || payload.type === 'shortcut') && payload.callback_id === 'add_application_note') {
+            const pool = req.app.locals.pool;
+            const triggerId = payload.trigger_id;
+            const channelId = payload.channel?.id;
+            const message = payload.message || null;
+
+            if (!channelId || !message?.ts) {
+                return res.status(200).send();
+            }
+
+            const applicationChannelId = process.env.CA_PRO_APPLICATION_SLACK_CHANNEL_ID;
+            if (applicationChannelId && channelId !== applicationChannelId) {
+                // Shortcuts are allowed anywhere, but we only support attaching notes from the application channel.
+                // Acknowledge silently to avoid noisy errors in other channels.
+                return res.status(200).send();
+            }
+
+            // If invoked on a thread reply, Slack includes `thread_ts` (root). Otherwise use the message ts.
+            const threadTs = message.thread_ts || message.ts;
+
+            let applicationId = null;
+            let applicationEmail = null;
+
+            try {
+                const appResult = await pool.query(
+                    'SELECT id, email FROM typeform_applications WHERE slack_thread_ts = $1 AND slack_channel_id = $2 LIMIT 1',
+                    [threadTs, channelId]
+                );
+                applicationId = appResult.rows[0]?.id || null;
+                applicationEmail = appResult.rows[0]?.email || null;
+            } catch (dbErr) {
+                console.error('Error resolving application for add_application_note shortcut:', dbErr.message);
+            }
+
+            const fallbackEmail = applicationEmail || extractEmailFromSlackMessage(message);
+
+            const needsIdentifier = !applicationId;
+
+            const view = {
+                type: 'modal',
+                callback_id: 'add_application_note_modal',
+                title: { type: 'plain_text', text: 'Add Note' },
+                submit: { type: 'plain_text', text: 'Save' },
+                close: { type: 'plain_text', text: 'Cancel' },
+                private_metadata: JSON.stringify({
+                    channelId,
+                    threadTs,
+                    applicationId,
+                    fallbackEmail: fallbackEmail || null
+                }),
+                blocks: [
+                    ...(needsIdentifier ? [
+                        {
+                            type: 'input',
+                            block_id: 'app_identifier_block',
+                            optional: true,
+                            label: { type: 'plain_text', text: 'Application Email (optional)' },
+                            element: {
+                                type: 'plain_text_input',
+                                action_id: 'app_identifier',
+                                initial_value: fallbackEmail || '',
+                                placeholder: { type: 'plain_text', text: 'email@example.com' }
+                            }
+                        }
+                    ] : [
+                        {
+                            type: 'context',
+                            elements: [
+                                {
+                                    type: 'mrkdwn',
+                                    text: `Adding a note for *${applicationEmail || 'this application'}*`
+                                }
+                            ]
+                        }
+                    ]),
+                    {
+                        type: 'input',
+                        block_id: 'note_text_block',
+                        label: { type: 'plain_text', text: 'Note' },
+                        element: {
+                            type: 'plain_text_input',
+                            action_id: 'note_text',
+                            multiline: true,
+                            placeholder: { type: 'plain_text', text: 'Type your note…' }
+                        }
+                    }
+                ]
+            };
+
+            await openModal(triggerId, view);
+            return res.status(200).send();
         }
 
         // Handle block actions (button clicks)
@@ -642,6 +771,119 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
             return res.status(200).send();
         }
 
+        if (payload.type === 'view_submission' && payload.view.callback_id === 'add_application_note_modal') {
+            const pool = req.app.locals.pool;
+
+            let privateMetadata = {};
+            try {
+                privateMetadata = JSON.parse(payload.view.private_metadata || '{}') || {};
+            } catch {
+                privateMetadata = {};
+            }
+
+            const userId = payload.user?.id;
+            const userName = payload.user?.username || payload.user?.name || 'unknown';
+            const createdBy = `${userName} (<@${userId}>)`;
+
+            const noteText = payload.view.state.values?.note_text_block?.note_text?.value?.trim() || '';
+            if (!noteText) {
+                return res.json({
+                    response_action: 'errors',
+                    errors: {
+                        note_text_block: 'Please enter a note.'
+                    }
+                });
+            }
+
+            const channelId = privateMetadata.channelId;
+            const threadTs = privateMetadata.threadTs;
+            let applicationId = privateMetadata.applicationId || null;
+
+            // Try resolving from thread context first (best case for auto-created application threads)
+            if (!applicationId && channelId && threadTs) {
+                try {
+                    const appResult = await pool.query(
+                        'SELECT id FROM typeform_applications WHERE slack_thread_ts = $1 AND slack_channel_id = $2 LIMIT 1',
+                        [threadTs, channelId]
+                    );
+                    applicationId = appResult.rows[0]?.id || null;
+                } catch (dbErr) {
+                    console.error('Error resolving application by thread for note modal:', dbErr.message);
+                }
+            }
+
+            // Fallback: allow identifier/email if the thread is older / not linked in DB
+            const identifierFromModal = payload.view.state.values?.app_identifier_block?.app_identifier?.value?.trim() || '';
+            const identifier = identifierFromModal || privateMetadata.fallbackEmail || '';
+
+            if (!applicationId && identifier) {
+                try {
+                    if (looksLikeUuid(identifier)) {
+                        const appResult = await pool.query(
+                            'SELECT id FROM typeform_applications WHERE id = $1 LIMIT 1',
+                            [identifier]
+                        );
+                        applicationId = appResult.rows[0]?.id || null;
+                    } else if (looksLikeEmail(identifier)) {
+                        const appResult = await pool.query(
+                            'SELECT id FROM typeform_applications WHERE LOWER(email) = LOWER($1) ORDER BY created_at DESC LIMIT 1',
+                            [identifier]
+                        );
+                        applicationId = appResult.rows[0]?.id || null;
+                    }
+                } catch (dbErr) {
+                    console.error('Error resolving application by identifier for note modal:', dbErr.message);
+                }
+            }
+
+            if (!applicationId) {
+                return res.json({
+                    response_action: 'errors',
+                    errors: {
+                        app_identifier_block: 'Could not determine which application this note is for. Try providing the application email.'
+                    }
+                });
+            }
+
+            // Create DB note; sync to Slack threads in the background.
+            const { note, applicationEmail } = await createApplicationNote({
+                pool,
+                applicationId,
+                noteText,
+                createdBy
+            });
+
+            res.status(200).send();
+
+            setImmediate(async () => {
+                const syncStatus = await syncApplicationNoteToSlack({
+                    pool,
+                    applicationId,
+                    applicationEmail,
+                    noteId: note.id,
+                    noteText: note.note_text,
+                    createdBy: note.created_by,
+                    createdAt: note.created_at
+                });
+
+                try {
+                    await pool.query(
+                        'INSERT INTO activity_log (action, entity_type, entity_id, details) VALUES ($1, $2, $3, $4)',
+                        ['note_added', 'typeform_application', applicationId, JSON.stringify({
+                            note_id: note.id,
+                            created_by: createdBy,
+                            source: 'slack_shortcut',
+                            ...syncStatus
+                        })]
+                    );
+                } catch (logError) {
+                    console.error('Failed to log note_added activity (slack shortcut):', logError.message);
+                }
+            });
+
+            return;
+        }
+
         // Handle message events (for edit thread replies)
         if (payload.type === 'event_callback' && payload.event.type === 'message') {
             // This will be handled by the events endpoint
@@ -657,8 +899,9 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
 
 // Handle Slack slash commands
 // Currently supported:
-// - /note <text> (preferred: run inside a Typeform application thread in #ca-pro-application)
-// - /note <email|applicationId> <text> (fallback if thread context is unavailable)
+// - /note <email|applicationId> <text>
+// Note: Slack does not allow custom slash commands to be invoked from message threads.
+// For thread-based note entry, use the Slack message shortcut "Add Note" (callback_id: add_application_note).
 router.post('/commands', verifySlackSignature, async (req, res) => {
     const pool = req.app.locals.pool;
 
@@ -685,6 +928,7 @@ router.post('/commands', verifySlackSignature, async (req, res) => {
         const fullText = (req.body.text || '').trim();
 
         // If Slack includes thread_ts, we can resolve the application from the thread root.
+        // (Slack custom slash commands generally cannot be invoked from thread replies, but keep this for safety.)
         const threadTs = req.body.thread_ts || null;
 
         let applicationId = null;
@@ -707,16 +951,13 @@ router.post('/commands', verifySlackSignature, async (req, res) => {
             const identifier = parts.shift();
             noteText = parts.join(' ').trim();
 
-            const looksLikeUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(identifier || '');
-            const looksLikeEmail = (identifier || '').includes('@');
-
-            if (looksLikeUuid) {
+            if (looksLikeUuid(identifier)) {
                 const appResult = await pool.query(
                     'SELECT id FROM typeform_applications WHERE id = $1',
                     [identifier]
                 );
                 applicationId = appResult.rows[0]?.id || null;
-            } else if (looksLikeEmail) {
+            } else if (looksLikeEmail(identifier)) {
                 const appResult = await pool.query(
                     'SELECT id FROM typeform_applications WHERE LOWER(email) = LOWER($1) ORDER BY created_at DESC LIMIT 1',
                     [identifier]
@@ -731,7 +972,7 @@ router.post('/commands', verifySlackSignature, async (req, res) => {
         if (!applicationId) {
             return res.json({
                 response_type: 'ephemeral',
-                text: 'Could not determine which application this note is for. Try running `/note <text>` inside an application thread, or use `/note email@example.com <text>`.'
+                text: 'Could not determine which application this note is for. Try `/note email@example.com <text>`.'
             });
         }
 
