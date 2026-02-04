@@ -73,16 +73,43 @@ router.post('/', async (req, res) => {
             });
         }
 
-        // Find matching typeform application
-        const appResult = await pool.query(
+        // Find matching typeform application - try email first, then fall back to name
+        let appResult = await pool.query(
             'SELECT id, first_name, last_name, email FROM typeform_applications WHERE LOWER(email) = $1',
             [email]
         );
 
+        // Fallback: try matching by name if email doesn't match
+        // Only check recent applications (last 30 days) to reduce false positives
+        if (appResult.rows.length === 0 && name) {
+            console.log(`No email match for ${email}, trying name match: ${name}`);
+
+            // Split the invitee name into parts
+            const nameParts = name.trim().split(/\s+/);
+            const firstName = nameParts[0];
+            const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : '';
+
+            if (firstName && lastName) {
+                appResult = await pool.query(`
+                    SELECT id, first_name, last_name, email
+                    FROM typeform_applications
+                    WHERE LOWER(first_name) = LOWER($1)
+                      AND LOWER(last_name) = LOWER($2)
+                      AND created_at > NOW() - INTERVAL '30 days'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                `, [firstName, lastName]);
+
+                if (appResult.rows.length > 0) {
+                    console.log(`Found application by name match: ${name} -> ${appResult.rows[0].email}`);
+                }
+            }
+        }
+
         if (appResult.rows.length === 0) {
-            console.log(`No matching typeform application for email: ${email}`);
+            console.log(`No matching typeform application for email: ${email} or name: ${name}`);
             // Still return success - the booking is valid, just no matching application
-            return res.json({ received: true, warning: 'no matching application', email });
+            return res.json({ received: true, warning: 'no matching application', email, name });
         }
 
         const application = appResult.rows[0];
