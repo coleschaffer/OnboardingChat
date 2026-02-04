@@ -2,7 +2,8 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const { gmailService } = require('../lib/gmail');
-const { createApplicationThread } = require('./slack-threads');
+const { postApplicationNotification, createApplicationThread, postMessage } = require('./slack-threads');
+const { createBusinessOwnerItem, businessOwnerExistsInMonday } = require('./monday');
 
 // Typeform webhook handler
 router.post('/typeform', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -262,6 +263,122 @@ router.get('/typeform/test', (req, res) => {
   res.json({ message: 'Typeform webhook endpoint is active' });
 });
 
+/**
+ * Create Business Owner in Monday.com from SamCart order
+ * Called async after order insertion
+ */
+async function createBusinessOwnerInMonday(pool, orderId, orderData, rawData) {
+  try {
+    // Check if Business Owner already exists by email
+    if (orderData.email) {
+      const exists = await businessOwnerExistsInMonday(orderData.email);
+      if (exists) {
+        console.log(`[Monday] Business Owner already exists for ${orderData.email}, skipping creation`);
+        return null;
+      }
+    }
+
+    // Create the Business Owner in Monday
+    const item = await createBusinessOwnerItem(orderData, rawData);
+
+    if (item) {
+      // Store monday_item_id in database
+      await pool.query(`
+        UPDATE samcart_orders
+        SET monday_item_id = $1, monday_created_at = NOW()
+        WHERE id = $2
+      `, [item.id, orderId]);
+
+      // Log to activity_log
+      await pool.query(`
+        INSERT INTO activity_log (action, entity_type, entity_id, details)
+        VALUES ($1, $2, $3, $4)
+      `, [
+        'monday_business_owner_created',
+        'samcart_order',
+        orderId,
+        JSON.stringify({
+          email: orderData.email,
+          name: item.name,
+          monday_item_id: item.id,
+          product: orderData.product_name
+        })
+      ]);
+
+      console.log(`[Monday] Stored monday_item_id ${item.id} for order ${orderId}`);
+      return item;
+    }
+
+    return null;
+  } catch (error) {
+    console.error(`[Monday] Error creating Business Owner for order ${orderId}:`, error.message);
+
+    // Log the error to activity_log
+    await pool.query(`
+      INSERT INTO activity_log (action, entity_type, entity_id, details)
+      VALUES ($1, $2, $3, $4)
+    `, [
+      'monday_business_owner_failed',
+      'samcart_order',
+      orderId,
+      JSON.stringify({
+        email: orderData.email,
+        error: error.message
+      })
+    ]);
+
+    return null;
+  }
+}
+
+/**
+ * Post SamCart order notification to #notifications-capro
+ * Returns the thread_ts for threading the welcome message
+ */
+async function postSamCartNotification(pool, orderId, orderData) {
+  const channelId = process.env.CA_PRO_NOTIFICATIONS_SLACK_CHANNEL;
+
+  if (!channelId) {
+    console.log('[SamCart] CA_PRO_NOTIFICATIONS_SLACK_CHANNEL not set, skipping Slack notification');
+    return null;
+  }
+
+  const customerName = [orderData.first_name, orderData.last_name].filter(Boolean).join(' ') || 'N/A';
+  const amount = orderData.order_total ? parseFloat(orderData.order_total).toFixed(2) : 'N/A';
+
+  const blocks = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Order ID:* ${orderData.samcart_order_id || 'N/A'}\n*Product:* ${orderData.product_name || 'CA Pro Membership'}\n*Amount:* ${amount}\n----------------------------------\n*Name:* ${customerName}\n*Email:* ${orderData.email || 'N/A'}`
+      }
+    }
+  ];
+
+  const text = `New SamCart Order: ${customerName} - ${orderData.product_name || 'CA Pro'}`;
+
+  try {
+    const response = await postMessage(channelId, text, blocks);
+
+    if (response && response.ts) {
+      // Store the Slack thread info in samcart_orders
+      await pool.query(
+        'UPDATE samcart_orders SET slack_channel_id = $1, slack_thread_ts = $2 WHERE id = $3',
+        [channelId, response.ts, orderId]
+      );
+
+      console.log(`[SamCart] Posted notification to Slack, thread_ts: ${response.ts}`);
+      return { channelId, threadTs: response.ts };
+    }
+
+    return null;
+  } catch (error) {
+    console.error('[SamCart] Error posting to Slack:', error);
+    return null;
+  }
+}
+
 // SamCart webhook handler
 router.post('/samcart', async (req, res) => {
   try {
@@ -349,7 +466,7 @@ router.post('/samcart', async (req, res) => {
     if (orderData.email) {
       await pool.query(`
         UPDATE typeform_applications
-        SET status = 'approved', updated_at = CURRENT_TIMESTAMP
+        SET status = 'approved'
         WHERE LOWER(email) = LOWER($1) AND status = 'new'
       `, [orderData.email]);
     }
@@ -368,6 +485,16 @@ router.post('/samcart', async (req, res) => {
     })]);
 
     console.log(`New SamCart order received: ${result.rows[0].id}`);
+
+    // Post notification to #notifications-capro (async - don't block response)
+    postSamCartNotification(pool, result.rows[0].id, orderData).catch(err => {
+      console.error('[SamCart] Error posting Slack notification:', err);
+    });
+
+    // Create Business Owner in Monday.com (async - don't block response)
+    createBusinessOwnerInMonday(pool, result.rows[0].id, orderData, payload).catch(err => {
+      console.error('[SamCart] Error creating Monday Business Owner:', err);
+    });
 
     res.status(200).json({
       success: true,
@@ -412,85 +539,122 @@ Best,
 Stefan`;
 
   try {
+    // Step 1: Post application notification to Slack (replaces Zapier)
+    if (process.env.CA_PRO_APPLICATION_SLACK_CHANNEL_ID) {
+      console.log('[AutoEmail] Posting application notification to Slack...');
+      const slackResult = await postApplicationNotification(pool, applicationId, fieldMapping);
+      if (slackResult) {
+        console.log(`[AutoEmail] Application posted to Slack with ts: ${slackResult.messageTs}`);
+      } else {
+        console.log('[AutoEmail] Failed to post application to Slack');
+      }
+    }
+
+    // Step 2: Try to send email (continue flow even if it fails)
+    let emailSent = false;
+    let emailError = null;
+    let emailResult = null;
+
     // Check if Gmail is configured
     if (!process.env.STEF_GOOGLE_CLIENT_ID || !process.env.STEF_GOOGLE_REFRESH_TOKEN) {
-      console.log('[AutoEmail] Gmail not configured - missing STEF_GOOGLE_CLIENT_ID or STEF_GOOGLE_REFRESH_TOKEN');
-      return;
-    }
-    console.log('[AutoEmail] Gmail credentials found, proceeding with email send');
+      emailError = 'Gmail not configured - missing STEF_GOOGLE_CLIENT_ID or STEF_GOOGLE_REFRESH_TOKEN';
+      console.log(`[AutoEmail] ${emailError}`);
+    } else {
+      console.log('[AutoEmail] Gmail credentials found, proceeding with email send');
+      try {
+        console.log(`[AutoEmail] Sending email to ${recipientEmail}...`);
+        emailResult = await gmailService.sendEmail(recipientEmail, subject, body);
+        emailSent = true;
+        console.log(`[AutoEmail] Email sent successfully! Thread ID: ${emailResult.threadId}, Message ID: ${emailResult.messageId}`);
 
-    // Send email
-    console.log(`[AutoEmail] Sending email to ${recipientEmail}...`);
-    const emailResult = await gmailService.sendEmail(recipientEmail, subject, body);
-    console.log(`[AutoEmail] Email sent successfully! Thread ID: ${emailResult.threadId}, Message ID: ${emailResult.messageId}`);
-
-    // Create email thread record
-    await pool.query(`
-      INSERT INTO email_threads (
-        gmail_thread_id, gmail_message_id, typeform_application_id,
-        recipient_email, recipient_first_name, subject, initial_email_sent_at, status
-      ) VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, 'sent')
-    `, [
-      emailResult.threadId,
-      emailResult.messageId,
-      applicationId,
-      recipientEmail,
-      firstName,
-      subject
-    ]);
-
-    // Update typeform_applications with emailed_at timestamp
-    await pool.query(
-      'UPDATE typeform_applications SET emailed_at = CURRENT_TIMESTAMP WHERE id = $1',
-      [applicationId]
-    );
-
-    // Log activity
-    await pool.query(`
-      INSERT INTO activity_log (action, entity_type, entity_id, details)
-      VALUES ($1, $2, $3, $4)
-    `, ['email_sent', 'typeform_application', applicationId, JSON.stringify({
-      email: recipientEmail,
-      subject: subject,
-      gmail_thread_id: emailResult.threadId
-    })]);
-
-    console.log(`[AutoEmail] Email records saved for ${recipientEmail}`);
-
-    // Create Slack thread on Zapier message with retry logic
-    if (process.env.CA_PRO_APPLICATION_SLACK_CHANNEL_ID) {
-      console.log('[AutoEmail] Slack channel configured, attempting to create thread...');
-
-      // Retry up to 3 times with increasing delays (10s, 20s, 30s)
-      let threadResult = null;
-      const retryDelays = [10000, 20000, 30000];
-
-      for (let attempt = 0; attempt < retryDelays.length; attempt++) {
-        console.log(`[AutoEmail] Waiting ${retryDelays[attempt] / 1000}s before Slack thread attempt ${attempt + 1}...`);
-        await new Promise(resolve => setTimeout(resolve, retryDelays[attempt]));
-
-        threadResult = await createApplicationThread(
-          pool,
+        // Create email thread record
+        await pool.query(`
+          INSERT INTO email_threads (
+            gmail_thread_id, gmail_message_id, typeform_application_id,
+            recipient_email, recipient_first_name, subject, initial_email_sent_at, status
+          ) VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, 'sent')
+        `, [
+          emailResult.threadId,
+          emailResult.messageId,
           applicationId,
           recipientEmail,
           firstName,
-          subject,
-          body
+          subject
+        ]);
+
+        // Update typeform_applications with emailed_at timestamp
+        await pool.query(
+          'UPDATE typeform_applications SET emailed_at = CURRENT_TIMESTAMP WHERE id = $1',
+          [applicationId]
         );
 
-        if (threadResult) {
-          console.log(`[AutoEmail] Slack thread created successfully on attempt ${attempt + 1} for ${recipientEmail}`);
-          break;
-        } else {
-          console.log(`[AutoEmail] Slack thread attempt ${attempt + 1} failed - Zapier message not found yet`);
-        }
-      }
+        // Log activity
+        await pool.query(`
+          INSERT INTO activity_log (action, entity_type, entity_id, details)
+          VALUES ($1, $2, $3, $4)
+        `, ['email_sent', 'typeform_application', applicationId, JSON.stringify({
+          email: recipientEmail,
+          subject: subject,
+          gmail_thread_id: emailResult.threadId
+        })]);
 
-      if (!threadResult) {
-        console.log(`[AutoEmail] Could not create Slack thread after ${retryDelays.length} attempts - Zapier message not found for ${recipientEmail}`);
+        console.log(`[AutoEmail] Email records saved for ${recipientEmail}`);
+      } catch (err) {
+        emailError = err.message;
+        console.error(`[AutoEmail] Email failed: ${emailError}`);
+
+        // Log the error
+        await pool.query(`
+          INSERT INTO activity_log (action, entity_type, entity_id, details)
+          VALUES ($1, $2, $3, $4)
+        `, ['email_send_failed', 'typeform_application', applicationId, JSON.stringify({
+          email: recipientEmail,
+          error: emailError
+        })]);
       }
-    } else {
-      console.log('[AutoEmail] CA_PRO_APPLICATION_SLACK_CHANNEL_ID not set, skipping Slack thread');
+    }
+
+    // Step 3: Add WhatsApp template and email status to Slack thread
+    if (process.env.CA_PRO_APPLICATION_SLACK_CHANNEL_ID) {
+      const slackBlocks = require('../lib/slack-blocks');
+
+      // Get stored thread info
+      const threadResult = await pool.query(
+        'SELECT slack_channel_id, slack_thread_ts FROM typeform_applications WHERE id = $1',
+        [applicationId]
+      );
+
+      if (threadResult.rows[0]?.slack_thread_ts) {
+        const { slack_channel_id: channelId, slack_thread_ts: threadTs } = threadResult.rows[0];
+
+        // Post WhatsApp template
+        const whatsappBlock = slackBlocks.createWhatsAppTemplateBlock(firstName);
+        await postMessage(channelId, whatsappBlock.text, whatsappBlock.blocks, threadTs);
+
+        // Post email status (success or error)
+        if (emailSent) {
+          const emailBlock = slackBlocks.createEmailSentBlock(recipientEmail, subject, body);
+          await postMessage(channelId, emailBlock.text, emailBlock.blocks, threadTs);
+          console.log(`[AutoEmail] Slack thread updated with email success for ${recipientEmail}`);
+        } else {
+          const errorBlock = slackBlocks.createEmailFailedBlock(recipientEmail, emailError);
+          await postMessage(channelId, errorBlock.text, errorBlock.blocks, threadTs);
+          console.log(`[AutoEmail] Slack thread updated with email error for ${recipientEmail}`);
+        }
+
+        // Log activity
+        await pool.query(
+          'INSERT INTO activity_log (action, entity_type, entity_id, details) VALUES ($1, $2, $3, $4)',
+          ['slack_thread_updated', 'typeform_application', applicationId, JSON.stringify({
+            channel_id: channelId,
+            thread_ts: threadTs,
+            email: recipientEmail,
+            email_sent: emailSent
+          })]
+        );
+      } else {
+        console.log('[AutoEmail] Could not update Slack thread - thread not found');
+      }
     }
 
   } catch (error) {
@@ -499,7 +663,7 @@ Stefan`;
     await pool.query(`
       INSERT INTO activity_log (action, entity_type, entity_id, details)
       VALUES ($1, $2, $3, $4)
-    `, ['email_send_failed', 'typeform_application', applicationId, JSON.stringify({
+    `, ['email_flow_error', 'typeform_application', applicationId, JSON.stringify({
       email: recipientEmail,
       error: error.message
     })]);

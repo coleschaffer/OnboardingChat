@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { syncOnboardingToMonday } = require('./monday');
+const { syncOnboardingToMonday, createBusinessOwnerItem, businessOwnerExistsInMonday, updateBusinessOwnerCompany } = require('./monday');
 const { gmailService } = require('../lib/gmail');
 const { postReplyNotification } = require('./slack-threads');
 
@@ -1113,6 +1113,150 @@ router.post('/trigger-email-flow', async (req, res) => {
   } catch (error) {
     console.error('Error triggering email flow:', error);
     res.status(500).json({ error: 'Failed to trigger email flow' });
+  }
+});
+
+// Process pending Monday Business Owner creations - retry failed/missing ones
+router.post('/process-monday-business-owners', async (req, res) => {
+  try {
+    // Verify secret key
+    const secretKey = req.headers['x-cron-secret'] || req.body.secret;
+    const expectedSecret = process.env.CRON_SECRET;
+
+    if (!expectedSecret) {
+      console.error('CRON_SECRET not configured');
+      return res.status(500).json({ error: 'Server not configured for cron jobs' });
+    }
+
+    if (secretKey !== expectedSecret) {
+      console.error('Invalid cron secret provided');
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const pool = req.app.locals.pool;
+    console.log('[Monday] Processing pending Business Owner creations...');
+
+    // Find SamCart orders from the last 24 hours without monday_item_id
+    const pendingOrders = await pool.query(`
+      SELECT id, samcart_order_id, email, first_name, last_name, phone,
+             product_name, order_total, raw_data, created_at
+      FROM samcart_orders
+      WHERE monday_item_id IS NULL
+        AND email IS NOT NULL
+        AND created_at > NOW() - INTERVAL '24 hours'
+        AND status = 'completed'
+      ORDER BY created_at ASC
+      LIMIT 20
+    `);
+
+    console.log(`[Monday] Found ${pendingOrders.rows.length} orders without monday_item_id`);
+
+    const results = {
+      processed: 0,
+      created: 0,
+      skipped_exists: 0,
+      errors: []
+    };
+
+    for (const order of pendingOrders.rows) {
+      try {
+        results.processed++;
+
+        // Check if Business Owner already exists in Monday (might have been created via Zapier)
+        const exists = await businessOwnerExistsInMonday(order.email);
+        if (exists) {
+          console.log(`[Monday] Business Owner already exists for ${order.email}, skipping`);
+          results.skipped_exists++;
+          continue;
+        }
+
+        // Build orderData from the row
+        const orderData = {
+          email: order.email,
+          first_name: order.first_name,
+          last_name: order.last_name,
+          phone: order.phone,
+          product_name: order.product_name,
+          order_total: order.order_total,
+          created_at: order.created_at
+        };
+
+        // Parse raw_data for payment method detection
+        let rawData = null;
+        try {
+          rawData = typeof order.raw_data === 'string' ? JSON.parse(order.raw_data) : order.raw_data;
+        } catch (e) {
+          // Ignore parse errors
+        }
+
+        // Create the Business Owner in Monday
+        const item = await createBusinessOwnerItem(orderData, rawData);
+
+        if (item) {
+          // Store monday_item_id in database
+          await pool.query(`
+            UPDATE samcart_orders
+            SET monday_item_id = $1, monday_created_at = NOW()
+            WHERE id = $2
+          `, [item.id, order.id]);
+
+          // Log to activity_log
+          await pool.query(`
+            INSERT INTO activity_log (action, entity_type, entity_id, details)
+            VALUES ($1, $2, $3, $4)
+          `, [
+            'monday_business_owner_created_retry',
+            'samcart_order',
+            order.id,
+            JSON.stringify({
+              email: order.email,
+              name: item.name,
+              monday_item_id: item.id,
+              product: order.product_name
+            })
+          ]);
+
+          // Check if there's a completed onboarding with a business name to update
+          const onboardingResult = await pool.query(`
+            SELECT os.data
+            FROM onboarding_submissions os
+            JOIN business_owners bo ON os.business_owner_id = bo.id
+            WHERE LOWER(bo.email) = LOWER($1)
+              AND os.is_complete = true
+            ORDER BY os.completed_at DESC
+            LIMIT 1
+          `, [order.email]);
+
+          if (onboardingResult.rows.length > 0) {
+            const data = onboardingResult.rows[0].data || {};
+            const businessName = data.answers?.businessName;
+            if (businessName) {
+              console.log(`[Monday] Also updating Company field to "${businessName}"`);
+              await updateBusinessOwnerCompany(item.id, businessName);
+            }
+          }
+
+          results.created++;
+          console.log(`[Monday] Created Business Owner for ${order.email} (retry)`);
+        }
+      } catch (error) {
+        console.error(`[Monday] Error processing order ${order.id}:`, error.message);
+        results.errors.push({
+          order_id: order.id,
+          email: order.email,
+          error: error.message
+        });
+      }
+    }
+
+    console.log('[Monday] Business Owner processing complete:', results);
+    res.json({
+      success: true,
+      ...results
+    });
+  } catch (error) {
+    console.error('[Monday] Error processing Business Owners:', error);
+    res.status(500).json({ error: 'Failed to process Monday Business Owners' });
   }
 });
 

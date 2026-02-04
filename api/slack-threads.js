@@ -46,13 +46,64 @@ function slackRequest(method, endpoint, body = null) {
 }
 
 /**
- * Find the Zapier message for a CA Pro application in the channel
- * Searches messages from the last 2 hours that contain "Product: CA Pro" and the applicant's email
- * Returns the MOST RECENT matching message
+ * Post Typeform application notification to #ca-pro-applications
+ * This replaces the Zapier integration - we post directly and store the message_ts
  *
- * @param {string} email - Applicant's email to search for
- * @param {string} channelId - Channel to search in (defaults to CA_PRO_APPLICATION_SLACK_CHANNEL_ID)
- * @returns {Object|null} - Slack message object or null if not found
+ * @param {Object} pool - Database pool
+ * @param {string} applicationId - Typeform application ID
+ * @param {Object} application - Application data (all 15 fields)
+ * @param {string} channelId - Channel to post to (defaults to CA_PRO_APPLICATION_SLACK_CHANNEL_ID)
+ * @returns {Object} - { channelId, messageTs } or null if failed
+ */
+async function postApplicationNotification(pool, applicationId, application, channelId = CA_PRO_CHANNEL_ID) {
+    const slackBlocks = require('../lib/slack-blocks');
+    const stefanSlackId = process.env.STEF_SLACK_MEMBER_ID;
+
+    if (!channelId) {
+        console.error('[Slack] CA_PRO_APPLICATION_SLACK_CHANNEL_ID not set');
+        return null;
+    }
+
+    console.log(`[Slack] Posting application notification for ${application.email}`);
+
+    try {
+        const appBlock = slackBlocks.createTypeformApplicationBlock(application, stefanSlackId);
+        const response = await postMessage(channelId, appBlock.text, appBlock.blocks);
+
+        if (!response.ok) {
+            console.error('[Slack] Failed to post application notification:', response.error);
+            return null;
+        }
+
+        const messageTs = response.ts;
+
+        // Store the thread info in typeform_applications
+        await pool.query(
+            'UPDATE typeform_applications SET slack_channel_id = $1, slack_thread_ts = $2 WHERE id = $3',
+            [channelId, messageTs, applicationId]
+        );
+
+        // Log activity
+        await pool.query(
+            'INSERT INTO activity_log (action, entity_type, entity_id, details) VALUES ($1, $2, $3, $4)',
+            ['slack_application_posted', 'typeform_application', applicationId, JSON.stringify({
+                channel_id: channelId,
+                message_ts: messageTs,
+                email: application.email
+            })]
+        );
+
+        console.log(`[Slack] Posted application notification with ts: ${messageTs}`);
+        return { channelId, messageTs };
+    } catch (error) {
+        console.error('[Slack] Error posting application notification:', error);
+        return null;
+    }
+}
+
+/**
+ * Find the Zapier message for a CA Pro application in the channel
+ * @deprecated Use postApplicationNotification instead - we now post our own messages
  */
 async function findZapierMessage(email, channelId = CA_PRO_CHANNEL_ID) {
     if (!channelId) {
@@ -211,7 +262,8 @@ async function openModal(triggerId, view) {
 }
 
 /**
- * Create a thread on a Zapier message with WhatsApp template and email info
+ * Add WhatsApp template and email info to an existing application thread
+ * The thread should already exist from postApplicationNotification
  *
  * @param {Object} pool - Database pool
  * @param {string} applicationId - Typeform application ID
@@ -219,21 +271,25 @@ async function openModal(triggerId, view) {
  * @param {string} firstName - Applicant first name
  * @param {string} emailSubject - Subject of sent email
  * @param {string} emailBody - Body of sent email
- * @param {string} channelId - Channel ID (defaults to CA_PRO_APPLICATION_SLACK_CHANNEL_ID)
  * @returns {Object} - { channelId, threadTs } or null if failed
  */
-async function createApplicationThread(pool, applicationId, email, firstName, emailSubject, emailBody, channelId = CA_PRO_CHANNEL_ID) {
+async function createApplicationThread(pool, applicationId, email, firstName, emailSubject, emailBody) {
     const slackBlocks = require('../lib/slack-blocks');
 
-    // Find the Zapier message
-    const zapierMessage = await findZapierMessage(email, channelId);
+    // Get the stored thread info from typeform_applications
+    const result = await pool.query(
+        'SELECT slack_channel_id, slack_thread_ts FROM typeform_applications WHERE id = $1',
+        [applicationId]
+    );
 
-    if (!zapierMessage) {
-        console.log(`No Zapier message found for ${email}`);
+    if (!result.rows[0] || !result.rows[0].slack_thread_ts) {
+        console.log(`[Slack] No thread found for application ${applicationId}`);
         return null;
     }
 
-    const threadTs = zapierMessage.ts;
+    const { slack_channel_id: channelId, slack_thread_ts: threadTs } = result.rows[0];
+
+    console.log(`[Slack] Adding email info to thread ${threadTs} for ${email}`);
 
     // Post WhatsApp template as first thread reply
     const whatsappBlock = slackBlocks.createWhatsAppTemplateBlock(firstName);
@@ -243,19 +299,14 @@ async function createApplicationThread(pool, applicationId, email, firstName, em
     const emailBlock = slackBlocks.createEmailSentBlock(email, emailSubject, emailBody);
     await postMessage(channelId, emailBlock.text, emailBlock.blocks, threadTs);
 
-    // Update the application with slack thread info
-    await pool.query(
-        'UPDATE typeform_applications SET slack_channel_id = $1, slack_thread_ts = $2 WHERE id = $3',
-        [channelId, threadTs, applicationId]
-    );
-
     // Log activity
     await pool.query(
         'INSERT INTO activity_log (action, entity_type, entity_id, details) VALUES ($1, $2, $3, $4)',
-        ['slack_thread_created', 'typeform_application', applicationId, JSON.stringify({
+        ['slack_thread_updated', 'typeform_application', applicationId, JSON.stringify({
             channel_id: channelId,
             thread_ts: threadTs,
-            email: email
+            email: email,
+            added: 'whatsapp_template,email_sent'
         })]
     );
 
@@ -330,6 +381,65 @@ async function postCallBookedNotification(pool, applicationId, applicantName, ap
 }
 
 /**
+ * Post onboarding update to an existing welcome thread
+ * Called when user completes onboarding AFTER a delayed welcome was already sent
+ *
+ * @param {Object} pool - Database pool
+ * @param {string} email - User's email to find the SamCart order
+ * @param {Object} onboardingData - Onboarding chat data (answers, teamMembers, cLevelPartners)
+ * @returns {boolean} - True if update was posted
+ */
+async function postOnboardingUpdateToWelcomeThread(pool, email, onboardingData) {
+    const slackBlocks = require('../lib/slack-blocks');
+
+    if (!email) return false;
+
+    // Find SamCart order with welcome already sent
+    const orderResult = await pool.query(`
+        SELECT id, slack_channel_id, slack_thread_ts, welcome_sent
+        FROM samcart_orders
+        WHERE LOWER(email) = LOWER($1)
+          AND welcome_sent = true
+          AND slack_thread_ts IS NOT NULL
+        ORDER BY created_at DESC
+        LIMIT 1
+    `, [email]);
+
+    if (orderResult.rows.length === 0) {
+        console.log(`[Slack] No welcome thread found for ${email} - onboarding update not needed`);
+        return false;
+    }
+
+    const order = orderResult.rows[0];
+    const { slack_channel_id, slack_thread_ts } = order;
+
+    console.log(`[Slack] Posting onboarding update to welcome thread ${slack_thread_ts}`);
+
+    try {
+        const businessName = onboardingData.answers?.businessName || onboardingData.businessName;
+        const updateBlock = slackBlocks.createOnboardingUpdateBlock(onboardingData.answers || onboardingData, businessName);
+
+        await postMessage(slack_channel_id, updateBlock.text, updateBlock.blocks, slack_thread_ts);
+
+        // Log activity
+        await pool.query(`
+            INSERT INTO activity_log (action, entity_type, entity_id, details)
+            VALUES ($1, $2, $3, $4)
+        `, ['slack_onboarding_update_posted', 'samcart_order', order.id, JSON.stringify({
+            email: email,
+            business_name: businessName,
+            thread_ts: slack_thread_ts
+        })]);
+
+        console.log(`[Slack] Onboarding update posted to welcome thread for ${email}`);
+        return true;
+    } catch (error) {
+        console.error(`[Slack] Error posting onboarding update: ${error.message}`);
+        return false;
+    }
+}
+
+/**
  * Post a note to an application's Slack thread
  */
 async function postNoteToThread(pool, applicationId, noteText, createdBy, createdAt) {
@@ -362,9 +472,11 @@ module.exports = {
     updateMessage,
     deleteMessage,
     openModal,
+    postApplicationNotification,
     createApplicationThread,
     postReplyNotification,
     postCallBookedNotification,
+    postOnboardingUpdateToWelcomeThread,
     postNoteToThread,
     slackRequest
 };

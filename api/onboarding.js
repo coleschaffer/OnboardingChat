@@ -3,16 +3,92 @@ const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 const { syncTeamMembers, syncPartners } = require('./activecampaign');
 const { syncTeamMembersToCircle, syncPartnersToCircle } = require('./circle');
+const { updateBusinessOwnerCompany } = require('./monday');
+const { postOnboardingUpdateToWelcomeThread } = require('./slack-threads');
+
+/**
+ * Update Monday.com Company field when onboarding completes
+ * Looks up the monday_item_id from samcart_orders by email
+ */
+async function updateMondayCompanyField(pool, answers) {
+  const businessName = answers.businessName;
+  const email = answers.email;
+
+  if (!businessName || !email) {
+    console.log('[Monday] No business name or email, skipping Company field update');
+    return;
+  }
+
+  try {
+    // Look up the SamCart order with monday_item_id by email
+    const orderResult = await pool.query(`
+      SELECT id, monday_item_id, email
+      FROM samcart_orders
+      WHERE LOWER(email) = LOWER($1)
+        AND monday_item_id IS NOT NULL
+      ORDER BY created_at DESC
+      LIMIT 1
+    `, [email]);
+
+    if (orderResult.rows.length === 0) {
+      console.log(`[Monday] No SamCart order with monday_item_id found for ${email}`);
+      return;
+    }
+
+    const order = orderResult.rows[0];
+    console.log(`[Monday] Updating Company field for monday_item_id ${order.monday_item_id}`);
+
+    // Update the Company field in Monday
+    const success = await updateBusinessOwnerCompany(order.monday_item_id, businessName);
+
+    if (success) {
+      // Log to activity_log
+      await pool.query(`
+        INSERT INTO activity_log (action, entity_type, entity_id, details)
+        VALUES ($1, $2, $3, $4)
+      `, [
+        'monday_company_updated',
+        'samcart_order',
+        order.id,
+        JSON.stringify({
+          email: email,
+          business_name: businessName,
+          monday_item_id: order.monday_item_id
+        })
+      ]);
+
+      console.log(`[Monday] Company field updated to "${businessName}" for ${email}`);
+    }
+  } catch (error) {
+    console.error(`[Monday] Error updating Company field for ${email}:`, error.message);
+
+    // Log the error
+    await pool.query(`
+      INSERT INTO activity_log (action, entity_type, entity_id, details)
+      VALUES ($1, $2, $3, $4)
+    `, [
+      'monday_company_update_failed',
+      'samcart_order',
+      null,
+      JSON.stringify({
+        email: email,
+        business_name: businessName,
+        error: error.message
+      })
+    ]);
+  }
+}
 
 // Helper to send Slack welcome message as a thread
 async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
   const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
-  const SLACK_WELCOME_USER_ID = process.env.SLACK_WELCOME_USER_ID;
+  const SLACK_WELCOME_CHANNEL_ID = process.env.CA_PRO_NOTIFICATIONS_SLACK_CHANNEL;
+  const SLACK_WELCOME_USER_ID = process.env.SLACK_WELCOME_USER_ID; // For tagging Stefan
   const BASE_URL = process.env.BASE_URL || 'https://onboarding.copyaccelerator.com';
 
   // Skip if Slack is not configured
-  if (!SLACK_BOT_TOKEN || !SLACK_WELCOME_USER_ID) {
-    console.log('Slack not configured, skipping welcome message');
+  if (!SLACK_BOT_TOKEN || !SLACK_WELCOME_CHANNEL_ID) {
+    console.log('Slack not configured (missing SLACK_BOT_TOKEN or CA_PRO_NOTIFICATIONS_SLACK_CHANNEL), skipping welcome message');
     return;
   }
 
@@ -148,24 +224,21 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
 
   console.log('Sending Slack welcome for:', memberData.businessName);
 
-  // Open DM channel with the welcome user
-  const openResponse = await fetch('https://slack.com/api/conversations.open', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${SLACK_BOT_TOKEN}`
-    },
-    body: JSON.stringify({ users: SLACK_WELCOME_USER_ID })
-  });
-
-  const openData = await openResponse.json();
-  if (!openData.ok) {
-    throw new Error(`Failed to open DM: ${openData.error}`);
-  }
-
-  const channelId = openData.channel.id;
   const fullName = [memberData.firstName, memberData.lastName].filter(Boolean).join(' ');
   const memberName = fullName || memberData.businessName || 'New Member';
+
+  // Check if we have a SamCart notification thread to reply to
+  let channelId = SLACK_WELCOME_CHANNEL_ID;
+  let parentThreadTs = null;
+
+  if (samcartData && samcartData.slack_thread_ts && samcartData.slack_channel_id) {
+    // Thread on the SamCart notification
+    channelId = samcartData.slack_channel_id;
+    parentThreadTs = samcartData.slack_thread_ts;
+    console.log(`[Welcome] Threading on SamCart notification: ${parentThreadTs}`);
+  } else {
+    console.log('[Welcome] No SamCart thread found, creating new top-level message');
+  }
 
   // Helper to send a message (optionally in a thread, with optional member data for editing context)
   async function sendMessage(blocks, text, threadTs = null, memberDataForEdit = null) {
@@ -203,7 +276,8 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
     return response.json();
   }
 
-  // Create parent message (thread starter) with member overview
+  // Create welcome message (either as thread reply to SamCart or new top-level message)
+  const stefanTag = SLACK_WELCOME_USER_ID ? `<@${SLACK_WELCOME_USER_ID}>` : '';
   const parentResult = await sendMessage([
     {
       type: 'header',
@@ -211,7 +285,7 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
     },
     {
       type: 'section',
-      text: { type: 'mrkdwn', text: `*Business:* ${memberData.businessName || 'N/A'}\n*Email:* ${memberData.email || 'N/A'}` }
+      text: { type: 'mrkdwn', text: `*Business:* ${memberData.businessName || 'N/A'}\n*Email:* ${memberData.email || 'N/A'}${stefanTag ? `\n${stefanTag}` : ''}` }
     },
     {
       type: 'context',
@@ -219,13 +293,14 @@ async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
         { type: 'mrkdwn', text: '_View thread for full details and welcome message →_' }
       ]
     }
-  ], `New member: ${memberName}`);
+  ], `New member: ${memberName}`, parentThreadTs);
 
   if (!parentResult.ok) {
-    throw new Error(`Failed to send parent message: ${parentResult.error}`);
+    throw new Error(`Failed to send welcome message: ${parentResult.error}`);
   }
 
-  const threadTs = parentResult.ts;
+  // Use SamCart thread if available, otherwise use the new message as thread parent
+  const threadTs = parentThreadTs || parentResult.ts;
   await new Promise(resolve => setTimeout(resolve, 300));
 
   // Thread message 1: Typeform Application Data (if available) - All 15 Questions
@@ -646,14 +721,24 @@ router.post('/save-progress', async (req, res) => {
         console.error('Failed to send Slack welcome:', err);
       });
 
-      // Schedule Monday.com sync for 10 minutes from now
-      // This gives time for native Monday automations to add the Business Owner first
+      // Schedule Monday.com sync immediately
+      // Business Owner is now created on SamCart purchase, so no need to wait
       await pool.query(`
         UPDATE onboarding_submissions
-        SET monday_sync_scheduled_at = NOW() + INTERVAL '10 minutes'
+        SET monday_sync_scheduled_at = NOW()
         WHERE session_id = $1
       `, [session]);
-      console.log(`[Onboarding] Scheduled Monday sync for 10 minutes from now (session: ${session})`);
+      console.log(`[Onboarding] Scheduled Monday sync immediately (session: ${session})`);
+
+      // Update Monday.com Company field if we have a SamCart order with monday_item_id
+      updateMondayCompanyField(pool, answers).catch(err => {
+        console.error('[Onboarding] Error updating Monday Company field:', err);
+      });
+
+      // If a delayed welcome was already sent, post onboarding update to that thread
+      postOnboardingUpdateToWelcomeThread(pool, answers.email, { answers, teamMembers, cLevelPartners }).catch(err => {
+        console.error('[Onboarding] Error posting onboarding update to welcome thread:', err);
+      });
 
       // Update typeform_applications.onboarding_completed_at if email matches
       if (answers.email) {
@@ -718,6 +803,24 @@ async function createOrUpdateBusinessOwner(pool, answers, teamMembers, cLevelPar
 
     let businessOwnerId;
 
+    // Look up Typeform data to get name (since chat doesn't collect it)
+    let typeformData = null;
+    if (answers.email) {
+      const typeformResult = await client.query(
+        'SELECT first_name, last_name, phone FROM typeform_applications WHERE LOWER(email) = LOWER($1) ORDER BY created_at DESC LIMIT 1',
+        [answers.email]
+      );
+      if (typeformResult.rows.length > 0) {
+        typeformData = typeformResult.rows[0];
+        console.log(`[Onboarding] Found Typeform data for ${answers.email}: ${typeformData.first_name} ${typeformData.last_name}`);
+      }
+    }
+
+    // Use Typeform name if chat didn't collect it
+    const firstName = answers.firstName || typeformData?.first_name || null;
+    const lastName = answers.lastName || typeformData?.last_name || null;
+    const phone = answers.phone || typeformData?.phone || null;
+
     // Try to find existing member by email if provided
     if (answers.email) {
       const existingMember = await client.query(
@@ -728,25 +831,31 @@ async function createOrUpdateBusinessOwner(pool, answers, teamMembers, cLevelPar
       if (existingMember.rows.length > 0) {
         businessOwnerId = existingMember.rows[0].id;
 
-        // Update existing member
+        // Update existing member (also fill in name/phone from Typeform if missing)
         await client.query(`
           UPDATE business_owners SET
-            business_name = COALESCE($1, business_name),
-            business_overview = COALESCE($2, business_overview),
-            team_count = COALESCE($3, team_count),
-            traffic_sources = COALESCE($4, traffic_sources),
-            landing_pages = COALESCE($5, landing_pages),
-            massive_win = COALESCE($6, massive_win),
-            ai_skill_level = COALESCE($7, ai_skill_level),
-            bio = COALESCE($8, bio),
-            headshot_url = COALESCE($9, headshot_url),
-            whatsapp_number = COALESCE($10, whatsapp_number),
-            whatsapp_joined = COALESCE($11, whatsapp_joined),
-            anything_else = COALESCE($12, anything_else),
+            first_name = COALESCE(first_name, $1),
+            last_name = COALESCE(last_name, $2),
+            phone = COALESCE(phone, $3),
+            business_name = COALESCE($4, business_name),
+            business_overview = COALESCE($5, business_overview),
+            team_count = COALESCE($6, team_count),
+            traffic_sources = COALESCE($7, traffic_sources),
+            landing_pages = COALESCE($8, landing_pages),
+            massive_win = COALESCE($9, massive_win),
+            ai_skill_level = COALESCE($10, ai_skill_level),
+            bio = COALESCE($11, bio),
+            headshot_url = COALESCE($12, headshot_url),
+            whatsapp_number = COALESCE($13, whatsapp_number),
+            whatsapp_joined = COALESCE($14, whatsapp_joined),
+            anything_else = COALESCE($15, anything_else),
             onboarding_status = 'completed',
             onboarding_progress = 100
-          WHERE id = $13
+          WHERE id = $16
         `, [
+          firstName,
+          lastName,
+          phone,
           answers.businessName,
           answers.businessOverview,
           answers.teamCount,
@@ -775,10 +884,10 @@ async function createOrUpdateBusinessOwner(pool, answers, teamMembers, cLevelPar
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
         RETURNING id
       `, [
-        answers.firstName || null,
-        answers.lastName || null,
+        firstName,
+        lastName,
         answers.email || null,
-        answers.phone || null,
+        phone,
         answers.businessName,
         answers.businessOverview,
         answers.teamCount,

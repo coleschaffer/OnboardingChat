@@ -618,7 +618,7 @@ async function updateBusinessOwnerCompany(businessOwnerId, companyName) {
 
 /**
  * Sync all (team members and partners) to Monday.com
- * This is called 10 minutes after OnboardingChat completion
+ * This is called after OnboardingChat completion
  * @param {Object} onboardingData - Full onboarding data including team members and partners
  * @param {string} businessOwnerEmail - Email of the Business Owner
  * @param {Object} pool - Database pool
@@ -671,6 +671,175 @@ async function syncOnboardingToMonday(onboardingData, businessOwnerEmail, pool =
   return combined;
 }
 
+/**
+ * Determine if a product is monthly or yearly based on product name and price
+ * @param {string} productName - Product name from SamCart
+ * @param {number} price - Order total from SamCart
+ * @returns {Object} { isMonthly: boolean, productLabel: string }
+ */
+function determineProductType(productName, price) {
+  const name = (productName || '').toLowerCase();
+  const amount = parseFloat(price) || 0;
+
+  // Check product name first
+  if (name.includes('monthly') || name.includes('month')) {
+    return { isMonthly: true, productLabel: 'CA PRO - M (Relaunch)' };
+  }
+  if (name.includes('yearly') || name.includes('year') || name.includes('annual')) {
+    return { isMonthly: false, productLabel: 'CA PRO - Y (Relaunch)' };
+  }
+
+  // Fall back to price heuristics
+  // Monthly: ~$5,000 (range $4,000 - $10,000)
+  // Yearly: ~$50,000 (range $40,000+)
+  if (amount >= 40000) {
+    return { isMonthly: false, productLabel: 'CA PRO - Y (Relaunch)' };
+  }
+
+  // Default to monthly for lower amounts
+  return { isMonthly: true, productLabel: 'CA PRO - M (Relaunch)' };
+}
+
+/**
+ * Calculate the next payment due date
+ * @param {Date} startDate - Order/start date
+ * @param {boolean} isMonthly - True for monthly, false for yearly
+ * @returns {Date} Next payment due date
+ */
+function calculateRenewalDate(startDate, isMonthly) {
+  const date = new Date(startDate);
+  if (isMonthly) {
+    date.setMonth(date.getMonth() + 1);
+  } else {
+    date.setFullYear(date.getFullYear() + 1);
+  }
+  return date;
+}
+
+/**
+ * Format date for Monday.com date column (YYYY-MM-DD)
+ * @param {Date|string} date - Date to format
+ * @returns {string} Formatted date string
+ */
+function formatMondayDate(date) {
+  const d = new Date(date);
+  return d.toISOString().split('T')[0];
+}
+
+/**
+ * Determine payment method from SamCart raw data
+ * @param {Object} rawData - Raw SamCart webhook payload
+ * @returns {string} "Stripe" or "PayPal"
+ */
+function determinePaymentMethod(rawData) {
+  if (!rawData) return 'Stripe';
+
+  // Check various fields where payment method might be indicated
+  const paymentMethod = rawData.payment_method || rawData.processor || '';
+  const paymentType = rawData.payment_type || '';
+
+  if (paymentMethod.toLowerCase().includes('paypal') ||
+      paymentType.toLowerCase().includes('paypal')) {
+    return 'PayPal';
+  }
+
+  return 'Stripe';
+}
+
+/**
+ * Create a Business Owner item in Monday.com PRO Business Owners board
+ * Called when a SamCart purchase is received
+ * @param {Object} orderData - SamCart order data
+ * @param {Object} rawData - Raw SamCart webhook payload (for payment method detection)
+ * @returns {Promise<Object>} Created item { id, name } or null if failed
+ */
+async function createBusinessOwnerItem(orderData, rawData = null) {
+  if (!isConfigured()) {
+    console.log('[Monday] Not configured, skipping Business Owner creation');
+    return null;
+  }
+
+  const { isMonthly, productLabel } = determineProductType(orderData.product_name, orderData.order_total);
+  const orderDate = orderData.created_at || new Date();
+  const renewalDate = calculateRenewalDate(orderDate, isMonthly);
+  const paymentMethod = determinePaymentMethod(rawData);
+  const amount = parseFloat(orderData.order_total) || 0;
+
+  // Build full name for item name
+  const fullName = [orderData.first_name, orderData.last_name].filter(Boolean).join(' ') || 'Unknown';
+
+  console.log(`[Monday] Creating Business Owner: ${fullName} (${orderData.email})`);
+  console.log(`[Monday] Product: ${productLabel}, Amount: ${amount}, MOP: ${paymentMethod}`);
+
+  // Build column values using known column IDs from the plan
+  const columnValues = {
+    // Email (email column)
+    'email': { email: orderData.email, text: orderData.email },
+    // Onboarding Form (status column) = "Completed"
+    'status_1': { label: 'Completed' },
+    // Participation Agreement (status column) = blank (omit)
+    // Status (status column) = "Active"
+    'status': { label: 'Active' },
+    // Product (status/label column)
+    'label': { label: productLabel },
+    // MOP - Method of Payment (status/label column)
+    'label2': { label: paymentMethod },
+    // Start Date (date column)
+    'date': { date: formatMondayDate(orderDate) },
+    // Next Payment Due (date column)
+    'dup__of_start_date': { date: formatMondayDate(renewalDate) },
+    // Amount (numbers column)
+    'numbers': amount,
+    // MRR (numbers column) - Amount if monthly, 0 if yearly
+    'numbers3': isMonthly ? amount : 0,
+    // LTV (numbers column) - Purchase amount
+    'numbers9': amount,
+    // # Charges (numbers column) - 1 for initial purchase
+    'numbers__1': 1,
+    // Phone (phone column) - if available
+    ...(orderData.phone ? { 'phone': { phone: orderData.phone, countryShortName: 'US' } } : {})
+    // Notes, Title, Company, Paused/Cancelled Date, Onboarding Meeting = blank (omit)
+  };
+
+  const query = `
+    mutation ($boardId: ID!, $itemName: String!, $columnValues: JSON!) {
+      create_item(
+        board_id: $boardId,
+        item_name: $itemName,
+        column_values: $columnValues
+      ) {
+        id
+        name
+      }
+    }
+  `;
+
+  try {
+    const data = await mondayRequest(query, {
+      boardId: BOARDS.PRO_BUSINESS_OWNERS,
+      itemName: fullName,
+      columnValues: JSON.stringify(columnValues)
+    });
+
+    console.log(`[Monday] Created Business Owner item: ${data.create_item.name} (ID: ${data.create_item.id})`);
+    return data.create_item;
+  } catch (error) {
+    console.error(`[Monday] Error creating Business Owner: ${error.message}`);
+    throw error;
+  }
+}
+
+/**
+ * Check if a Business Owner already exists by email
+ * Used to prevent duplicates
+ * @param {string} email - Email to check
+ * @returns {Promise<boolean>} True if exists
+ */
+async function businessOwnerExistsInMonday(email) {
+  const existing = await findBusinessOwnerByEmail(email);
+  return existing !== null;
+}
+
 module.exports = {
   isConfigured,
   getColumnIds,
@@ -680,5 +849,8 @@ module.exports = {
   syncTeamMembersToMonday,
   syncPartnersToMonday,
   syncOnboardingToMonday,
+  updateBusinessOwnerCompany,
+  createBusinessOwnerItem,
+  businessOwnerExistsInMonday,
   BOARDS
 };
