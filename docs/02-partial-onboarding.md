@@ -1,186 +1,106 @@
-# Partial Onboarding Support
+# Partial Onboarding + Resume Support
 
 ## Overview
 
-This feature enables the system to capture and track partially completed onboarding submissions. Users who start the onboarding process but don't finish will still have their progress saved to the database, allowing administrators to see incomplete submissions and potentially follow up.
+The onboarding chat supports **partial saves** so a member can refresh/leave and resume later. Progress is stored in:
 
-## How It Works
+- **Client**: `localStorage` (fast resume in the browser)
+- **Server**: `onboarding_submissions` (admin visibility + recovery)
 
-### Session Management
-- When a user starts the onboarding chat, a unique session ID is generated and stored in `sessionStorage`
-- This session ID persists across browser refreshes (within the same tab/session)
-- The session ID is cleared upon successful completion
+## Client Behavior (Public Chat)
 
-### Progress Saving
-- After each question is answered, the system automatically saves progress to the backend
-- The save includes:
-  - All answers collected so far
-  - Any team members or C-level partners added
-  - Current question number
-  - Progress percentage
-  - Last question answered
+Implemented in `public/script.js`:
 
-### Completion Status
-- Submissions are tracked as either **complete** or **incomplete**
-- CSV imports are automatically marked as **complete** (100% progress) since those users already provided their data
-- Chat onboarding submissions start as incomplete and become complete when the user finishes all questions
+- **Storage key**: `ca_pro_onboarding` (in `localStorage`)
+- Stored data:
+  - `sessionId`, `currentQuestion`
+  - `answers`
+  - `teamMembers`, `cLevelPartners`
+  - `hasTeamMembers` (AI validation result)
+  - `isComplete`
+- On load:
+  - If `isComplete` is true → shows the completion screen immediately
+  - Else if `currentQuestion > 0` → replays prior Q&A and resumes at the saved question
 
-## Database Changes
+### Team Step Skipping (AI + Fallback)
 
-### business_owners Table
-Added columns:
-- `onboarding_progress` INTEGER (0-100) - Tracks completion percentage
-- `last_question_answered` VARCHAR(100) - ID of the last question answered
+After the user answers the **Team Count** question, the client calls:
 
-### onboarding_submissions Table
-Added columns:
-- `session_id` VARCHAR(255) UNIQUE - Links multiple saves from same session
-- `progress_percentage` INTEGER - Progress at time of save (0-100)
-- `last_question` VARCHAR(100) - Question ID where user left off
-- `is_complete` BOOLEAN - Whether submission is finished
-- `updated_at` TIMESTAMP - Last update time (auto-updated via trigger)
+- `POST /api/validate-team-count`
 
-## API Changes
+If the response indicates *no* team members, the chat skips the `teamMembers` step.
 
-### New Endpoint: `POST /api/onboarding/save-progress`
+## Backend Behavior (Progress Saves)
 
-Saves partial or complete onboarding data.
+### `POST /api/onboarding/save-progress`
 
-**Request Body:**
-```json
-{
-  "sessionId": "session_123_abc",
-  "answers": {
-    "businessName": "Acme Corp",
-    "teamCount": "5",
-    "lastQuestionId": "trafficSources"
-  },
-  "teamMembers": [],
-  "cLevelPartners": [],
-  "currentQuestion": 4,
-  "totalQuestions": 13,
-  "isComplete": false
-}
-```
+The browser calls this after each answer. The request includes:
 
-**Response:**
-```json
-{
-  "success": true,
-  "sessionId": "session_123_abc",
-  "submissionId": "uuid",
-  "businessOwnerId": null,
-  "progress": 30,
-  "isComplete": false
-}
-```
+- `sessionId`
+- `answers` (plus `answers.lastQuestionId` for tracking)
+- `teamMembers`, `cLevelPartners`
+- `currentQuestion`, `totalQuestions`
+- `isComplete`
 
-### Updated: `GET /api/onboarding/submissions`
+The server stores/updates a row in `onboarding_submissions` keyed by `session_id`:
 
-Now supports filtering by completion status.
+- `data` = `{ answers, teamMembers, cLevelPartners }`
+- `progress_percentage` = `round(currentQuestion / totalQuestions * 100)`
+- `last_question` = `answers.lastQuestionId`
+- `is_complete`, `completed_at`
 
-**Query Parameters:**
-- `complete` - Filter by completion status (`true` or `false`)
-- `search` - Search by name, email, business name
-- `limit` - Page size (default 50)
-- `offset` - Page offset
+Additional side-effects during progress saves:
 
-**Response:**
-```json
-{
-  "submissions": [...],
-  "counts": {
-    "complete": 45,
-    "incomplete": 12,
-    "total": 57
-  },
-  "limit": 50,
-  "offset": 0
-}
-```
+- On the **first** save where an email is present, the server sets `typeform_applications.onboarding_started_at` (email match).
+- When **new** team-member/partner emails appear (compared to the previous save), the server triggers best-effort async syncs:
+  - Circle (`api/circle.js`)
+  - ActiveCampaign (`api/activecampaign.js`)
 
-### New Endpoint: `GET /api/onboarding/session/:sessionId`
+### Completion Processing (Runs Once)
 
-Retrieves a submission by session ID (for potential resume functionality).
+When a submission becomes complete for the **first** time, the server additionally:
 
-## Admin Dashboard Updates
+- Creates/updates `business_owners`
+- Inserts `team_members` and `c_level_partners`
+- Sets `onboarding_submissions.monday_sync_scheduled_at = NOW()` (for the cron-driven Monday sync)
+- Sets `typeform_applications.onboarding_completed_at` (if email matches)
+- Updates an existing SamCart welcome thread with onboarding data (if a thread exists)
 
-### Onboarding Tab Changes
+## Admin Dashboard Support
 
-1. **Stats Display** - Now shows:
-   - Members Pending (from business_owners.onboarding_status)
-   - Incomplete Submissions (from onboarding_submissions.is_complete = false)
-   - Complete Submissions (from onboarding_submissions.is_complete = true)
+The **Onboarding** tab in `/admin` uses:
 
-2. **Submissions Table** - New columns:
-   - Session ID (truncated for display)
-   - Progress bar with percentage
-   - Last Question answered
-   - Status badge (Complete/Incomplete)
-   - Updated timestamp
+- `GET /api/onboarding/submissions` (filter by `complete=true|false`)
+- `GET /api/onboarding/submissions/:id`
+- `GET /api/onboarding/session/:sessionId`
+- `POST /api/onboarding/submissions/:id/complete`
+- `DELETE /api/onboarding/submissions/:id`
 
-3. **Filters**:
-   - Search box for submissions
-   - Filter dropdown: All / Complete / Incomplete
+## Database Fields Involved
 
-## CSV Import Behavior
+### `onboarding_submissions`
 
-When importing from CSV files:
-- All records are automatically marked as `onboarding_status = 'completed'`
-- Progress is set to 100%
-- This is because CSV data represents users who have already provided their information through Google Forms
+- `session_id` (unique)
+- `data` (JSONB)
+- `progress_percentage`
+- `last_question`
+- `is_complete`, `completed_at`
+- `created_at`, `updated_at`
+- `monday_sync_scheduled_at`, `monday_synced`, `monday_synced_at`
 
-## Migration
+### `business_owners` (progress metadata)
 
-For existing databases, run the migration script:
+- `onboarding_status`
+- `onboarding_progress`
+- `last_question_answered`
 
-```bash
-psql $DATABASE_URL < db/migrations/001-add-partial-onboarding.sql
-```
+## Migration Notes
 
-This migration:
-1. Adds new columns to `business_owners` and `onboarding_submissions`
-2. Creates necessary indexes
-3. Updates existing CSV-imported records to be marked as complete
-4. Updates existing completed submissions to have `is_complete = true`
+- `db/migrations/001-add-partial-onboarding.sql` adds the original partial-onboarding columns/indexes.
 
-## Frontend Changes
+## Testing Checklist
 
-### Chat Interface (`public/script.js`)
-
-1. **Session ID Generation**
-   - Generates unique session ID on page load
-   - Stores in `sessionStorage` (persists across refresh, cleared on tab close)
-
-2. **Auto-Save After Each Question**
-   - `saveProgress()` function called after every answer
-   - Sends current state to `/api/onboarding/save-progress`
-   - Non-blocking (doesn't delay UI)
-
-3. **Completion Flow**
-   - Final save called with `isComplete: true`
-   - Session ID cleared from storage
-   - Business owner record created/updated
-
-## Use Cases
-
-### Tracking Abandoned Onboardings
-1. Admin views Onboarding tab
-2. Filters to "Incomplete" submissions
-3. Sees progress percentage and last question for each
-4. Can view submission data to see what was collected
-5. Can follow up with users who got far but didn't finish
-
-### Resuming Onboarding (Future Enhancement)
-The session tracking infrastructure enables a future "resume" feature where users could:
-1. Return to the onboarding page
-2. System detects existing session
-3. Prompts to resume from where they left off
-4. Pre-fills previous answers
-
-## Technical Notes
-
-- Progress saves are fire-and-forget (UI doesn't wait for response)
-- Failed saves are logged but don't interrupt user experience
-- Session IDs are formatted as `session_{timestamp}_{random}`
-- The `updated_at` trigger ensures accurate timestamps for sorting
+1. Start onboarding, answer a few questions.
+2. Refresh: confirm the chat resumes.
+3. Confirm `onboarding_submissions` updates the same `session_id`.
+4. Complete onboarding: confirm `is_complete=true` and downstream processing runs once.

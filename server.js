@@ -51,6 +51,7 @@ app.use('/api/applications', require('./api/applications'));
 app.use('/api/onboarding', require('./api/onboarding'));
 app.use('/api/webhooks', require('./api/webhooks'));
 app.use('/api/webhooks/calendly', require('./api/calendly'));
+app.use('/api/webhooks/wasender', require('./api/wasender'));
 app.use('/api/import', require('./api/import'));
 app.use('/api/stats', require('./api/stats'));
 app.use('/api', require('./api/validate'));
@@ -312,6 +313,22 @@ async function runMigrations() {
         IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                        WHERE table_name = 'typeform_applications' AND column_name = 'onboarding_completed_at') THEN
           ALTER TABLE typeform_applications ADD COLUMN onboarding_completed_at TIMESTAMP WITH TIME ZONE;
+        END IF;
+        -- WhatsApp join tracking (from Wasender webhook)
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'typeform_applications' AND column_name = 'whatsapp_joined_at') THEN
+          ALTER TABLE typeform_applications ADD COLUMN whatsapp_joined_at TIMESTAMP WITH TIME ZONE;
+        END IF;
+      END $$
+    `);
+
+    // Add WhatsApp join timestamp to business_owners (optional; used for unified/profile views)
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'business_owners' AND column_name = 'whatsapp_joined_at') THEN
+          ALTER TABLE business_owners ADD COLUMN whatsapp_joined_at TIMESTAMP WITH TIME ZONE;
         END IF;
       END $$
     `);

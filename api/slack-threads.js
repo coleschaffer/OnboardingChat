@@ -682,6 +682,39 @@ async function postNoteToThread(pool, applicationId, noteText, createdBy, create
     return response;
 }
 
+/**
+ * Post a note to a member's Purchase/Welcome Slack thread (if it exists)
+ *
+ * This is intended to mirror application notes into the SamCart purchase thread
+ * in #notifications-capro so the team has context in both places.
+ */
+async function postNoteToPurchaseThread(pool, email, noteText, createdBy, createdAt) {
+    if (!email) return null;
+
+    const slackBlocks = require('../lib/slack-blocks');
+
+    // Find the most recent SamCart thread for this email
+    const orderResult = await pool.query(`
+        SELECT slack_channel_id, slack_thread_ts
+        FROM samcart_orders
+        WHERE LOWER(email) = LOWER($1)
+          AND slack_channel_id IS NOT NULL
+          AND slack_thread_ts IS NOT NULL
+        ORDER BY created_at DESC
+        LIMIT 1
+    `, [email]);
+
+    if (orderResult.rows.length === 0) {
+        return null;
+    }
+
+    const { slack_channel_id, slack_thread_ts } = orderResult.rows[0];
+    const noteBlock = slackBlocks.createNoteAddedBlock(noteText, createdBy, createdAt);
+
+    const response = await postMessage(slack_channel_id, noteBlock.text, noteBlock.blocks, slack_thread_ts);
+    return response;
+}
+
 module.exports = {
     findZapierMessage,
     postMessage,
@@ -695,5 +728,6 @@ module.exports = {
     postCallBookedNotification,
     postOnboardingUpdateToWelcomeThread,
     postNoteToThread,
+    postNoteToPurchaseThread,
     slackRequest
 };

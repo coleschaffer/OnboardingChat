@@ -1,5 +1,7 @@
 # CA Pro Admin Dashboard & Backend - Initial Implementation
 
+> Note: This document captures the original (“v1”) implementation context and is kept for history. The current production system includes additional flows (Slack threading, Gmail reply workflow, Calendly, SamCart welcome threads, Monday sync, etc.). Start with `docs/README.md` for the up-to-date overview.
+
 ## Overview
 
 This document describes the initial implementation of the CA Pro onboarding system, converting a static chat interface into a full-stack application with:

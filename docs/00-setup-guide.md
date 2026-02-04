@@ -1,176 +1,276 @@
-# CA Pro Onboarding System - Setup Guide
+# Setup Guide (Local + Production)
+
+This guide walks through setting up the CA Pro OnboardingChat system locally and in production (Railway).
 
 ## Prerequisites
 
-- Node.js 18+ installed
-- PostgreSQL database (Railway recommended)
-- Typeform account (for webhook integration)
+- Node.js `>= 18`
+- PostgreSQL database
+- (Recommended) Slack App (bot token + signing secret)
+- (Recommended) Gmail API credentials (OAuth refresh token) for automated email + reply workflow
+- (Optional) Calendly API token for automatic webhook subscription creation
+- (Optional) Monday.com API token for Business Owner + team/partner sync
+- (Optional) Circle + ActiveCampaign credentials for contact sync
 
-## Quick Start
-
-### 1. Install Dependencies
+## 1) Install Dependencies
 
 ```bash
 npm install
 ```
 
-### 2. Configure Environment Variables
+## 2) Environment Variables
 
-Create a `.env` file based on `.env.example`:
+Create `.env` (or set variables in Railway):
 
-```bash
-cp .env.example .env
-```
-
-Edit `.env` with your values:
+### Core
 
 ```env
 DATABASE_URL=postgresql://user:password@host:port/database
-TYPEFORM_TOKEN=your_typeform_api_token
-TYPEFORM_FORM_ID=q6umv3xg
-TYPEFORM_WEBHOOK_SECRET=your_webhook_secret
-PORT=3000
 NODE_ENV=development
+PORT=3000
+
+# Strongly recommended (production URL). Used for:
+# - Calendly webhook callback URL creation
+# - cron-worker calls
+# - Slack copy links (/copy.html)
+BASE_URL=https://your-domain.com
 ```
 
-### 3. Set Up Database
+### Slack (recommended)
 
-Run the schema against your PostgreSQL database:
+```env
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_SIGNING_SECRET=...
 
-```bash
-# Using psql directly
-psql $DATABASE_URL < db/schema.sql
+# Channel IDs (not names)
+CA_PRO_APPLICATION_SLACK_CHANNEL_ID=C0123456789
+CA_PRO_NOTIFICATIONS_SLACK_CHANNEL=C0123456789
 
-# Or through Railway CLI
-railway run psql < db/schema.sql
+# Optional: used for tagging in Slack blocks
+STEF_SLACK_MEMBER_ID=U0123456789
+
+# Optional: only used by POST /api/slack/send-welcome (DM workflow)
+SLACK_WELCOME_USER_ID=U0123456789
 ```
 
-### 4. Import Historical Data (Optional)
+### Wasender (WhatsApp) (optional)
 
-If you have existing data in CSV files:
+```env
+# If set, the webhook requires x-wasender-secret (or ?secret=) to match.
+WASENDER_WEBHOOK_SECRET=some-long-random-secret
 
-```bash
-# Import business owners
-npm run import -- --business-owners "CA PRO New Member Onboarding Form (Business Owner) (Responses) - Form Responses 1.csv"
-
-# Import team members
-npm run import -- --team-members "CA PRO New Member Onboarding Form (Team Members) (Responses) - Form Responses 1.csv"
-
-# Or import both default files
-npm run import -- --all
+# Optional but recommended: only process join events for these WhatsApp group JIDs.
+# Comma-separated. Example:
+WASENDER_ALLOWED_GROUP_JIDS=120363261244407125@g.us,120363276808270172@g.us
 ```
 
-### 5. Configure Typeform Webhook
+### Typeform
 
-1. Log into Typeform dashboard
-2. Go to your form's Connect > Webhooks
-3. Add webhook URL: `https://your-domain.com/api/webhooks/typeform`
-4. (Optional) Set a webhook secret for signature verification
-5. Save the webhook
+```env
+# Optional: verifies typeform-signature header on incoming webhooks
+TYPEFORM_WEBHOOK_SECRET=...
 
-### 6. Start the Server
+# Optional: only used by lib/typeform.js (not required for webhook ingestion)
+TYPEFORM_TOKEN=...
+TYPEFORM_FORM_ID=...
+```
+
+### Gmail (automated outbound email + reply tracking)
+
+```env
+STEF_GOOGLE_CLIENT_ID=...
+STEF_GOOGLE_CLIENT_SECRET=...
+STEF_GOOGLE_REFRESH_TOKEN=...
+```
+
+### Calendly (optional but recommended)
+
+```env
+STEF_CALENDLY_TOKEN=...
+```
+
+### Monday.com (optional)
+
+```env
+MONDAY_API_TOKEN=...
+```
+
+### Circle + ActiveCampaign (optional)
+
+```env
+CIRCLE_TOKEN_CA=...
+CIRCLE_TOKEN_SPG=...
+
+ACTIVECAMPAIGN_API_KEY=...
+ACTIVECAMPAIGN_URI=https://your-account.api-us1.com
+```
+
+### Cron Jobs
+
+```env
+CRON_SECRET=some-long-random-secret
+```
+
+## 3) Database Setup
+
+### 3.1 Enable required extensions
+
+This codebase uses **both** `uuid_generate_v4()` and `gen_random_uuid()` across tables, so enable:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+```
+
+### 3.2 Apply the base schema
 
 ```bash
-# Development (with auto-reload)
+psql "$DATABASE_URL" -f db/schema.sql
+```
+
+### 3.3 Apply required migrations (recommended)
+
+Some columns used by the running code are not guaranteed to be created by `server.js` runtime migrations.
+
+Run these (idempotent) migrations:
+
+```bash
+psql "$DATABASE_URL" -f db/migrations/009_monday_business_owner.sql
+psql "$DATABASE_URL" -f db/migrations/010_purchased_at.sql
+psql "$DATABASE_URL" -f db/migrations/011_sending_message_ts.sql
+```
+
+Optional (safe) migrations you may also want on existing DBs:
+
+```bash
+psql "$DATABASE_URL" -f db/migrations/002-expand-column-lengths.sql
+psql "$DATABASE_URL" -f db/migrations/007_email_threads.sql
+psql "$DATABASE_URL" -f db/migrations/012_whatsapp_joined_at.sql
+```
+
+### 3.4 Start the server once (runtime migrations)
+
+On startup, `server.js` runs `runMigrations()` which creates/updates additional tables/columns (SamCart orders, email thread tables, notes, Calendly subscription storage, Slack threading fields, etc.).
+
+```bash
 npm run dev
-
-# Production
-npm start
 ```
 
-### 7. Access the Application
+## 4) Configure Webhooks
 
-- **Chat Interface**: http://localhost:3000
-- **Admin Dashboard**: http://localhost:3000/admin
+### Typeform → `POST /api/webhooks/typeform`
 
-## Deployment to Railway
+- Webhook URL: `https://<BASE_URL>/api/webhooks/typeform`
+- Optional secret: set the same value in Typeform and `TYPEFORM_WEBHOOK_SECRET`
 
-### Via Railway CLI
+You can verify the endpoint:
 
 ```bash
-# Login to Railway
-railway login
-
-# Link to your project
-railway link
-
-# Deploy
-railway up
+curl https://<BASE_URL>/api/webhooks/typeform/test
 ```
 
-### Via GitHub Integration
+### SamCart → `POST /api/webhooks/samcart`
 
-1. Push code to GitHub
-2. Connect Railway to your GitHub repo
-3. Railway will auto-deploy on push
+- Notify URL: `https://<BASE_URL>/api/webhooks/samcart`
 
-### Environment Variables
-
-Set these in Railway dashboard or via CLI:
+You can verify the endpoint:
 
 ```bash
-railway variables set DATABASE_URL=...
-railway variables set TYPEFORM_TOKEN=...
-railway variables set TYPEFORM_FORM_ID=q6umv3xg
-railway variables set NODE_ENV=production
+curl https://<BASE_URL>/api/webhooks/samcart/test
 ```
 
-## File Structure
+### Calendly → `POST /api/webhooks/calendly`
 
-```
-/
-├── server.js              # Express server
-├── package.json           # Dependencies & scripts
-├── .env.example           # Environment template
-├── /public                # Chat interface (served at /)
-│   ├── index.html
-│   ├── styles.css
-│   ├── script.js
-│   └── CA_Favicon.png
-├── /admin                 # Admin dashboard (served at /admin)
-│   ├── index.html
-│   ├── styles.css
-│   └── script.js
-├── /api                   # API routes
-│   ├── members.js         # Business owners CRUD
-│   ├── team-members.js    # Team members CRUD
-│   ├── applications.js    # Typeform applications
-│   ├── onboarding.js      # Onboarding submissions
-│   ├── webhooks.js        # Typeform webhook
-│   ├── import.js          # CSV import API
-│   └── stats.js           # Dashboard stats
-├── /db
-│   ├── schema.sql         # Database schema
-│   ├── import.js          # CLI import script
-│   └── /migrations        # Database migrations
-└── /lib
-    └── typeform.js        # Typeform API client
+If `STEF_CALENDLY_TOKEN` is set, the server will create (or re-use) a webhook subscription automatically on startup using:
+
+- Callback URL: `https://<BASE_URL>/api/webhooks/calendly`
+- Event: `invitee.created`
+
+Health check:
+
+```bash
+curl https://<BASE_URL>/api/webhooks/calendly/test
 ```
 
-## Troubleshooting
+If you do *not* configure Calendly via token, you can still point Calendly to the endpoint manually, but signature verification may be skipped unless a signing key is stored in the DB.
 
-### Database Connection Issues
+### Wasender (WhatsApp) → `POST /api/webhooks/wasender`
 
-1. Verify DATABASE_URL is correct
-2. Check SSL settings (production requires SSL)
-3. Ensure IP is whitelisted if using external DB
+This webhook tracks when a member joins the WhatsApp group and marks the Typeform application as **Joined** (final state).
 
-### Typeform Webhook Not Working
+- Webhook URL: `https://<BASE_URL>/api/webhooks/wasender`
+- Optional secret: set `WASENDER_WEBHOOK_SECRET` and configure Wasender to send `x-wasender-secret: <secret>`
+- Recommended: set `WASENDER_ALLOWED_GROUP_JIDS` so only the intended CA Pro groups mark members as Joined.
+- Recommended scopes/events (minimum):
+  - `group-participants.update`
 
-1. Verify webhook URL is accessible (HTTPS required)
-2. Check webhook secret matches
-3. Look at Railway logs for errors
+Health check:
 
-### CSV Import Fails
+```bash
+curl https://<BASE_URL>/api/webhooks/wasender/test
+```
 
-1. Check file encoding (UTF-8 required)
-2. Verify column headers match expected format
-3. Check for special characters in data
+## 5) Slack App Setup
 
-## Available Scripts
+### 5.1 Interactivity + Events URLs
 
-- `npm start` - Start production server
-- `npm run dev` - Start development server with auto-reload
-- `npm run import -- --all` - Import CSV files from project root
-- `npm run import -- --business-owners <file>` - Import business owners CSV
-- `npm run import -- --team-members <file>` - Import team members CSV
+- Interactivity request URL: `https://<BASE_URL>/api/slack/interactions`
+- Event subscriptions request URL: `https://<BASE_URL>/api/slack/events`
+- Slash commands request URL: `https://<BASE_URL>/api/slack/commands` (supports `/note`)
+
+The app verifies Slack signatures, so `SLACK_SIGNING_SECRET` must match your app’s signing secret.
+
+### 5.2 Required OAuth scopes
+
+At minimum (based on Web API usage in `api/slack.js` and `api/slack-threads.js`):
+
+- `commands` (required for slash commands like `/note`)
+- `chat:write`
+- `users:read`
+- `im:write` (for `/api/slack/send-welcome`)
+- `channels:history` (if your channels are public)
+- `groups:history` (if your channels are private)
+- `im:history`
+- `mpim:history`
+
+### 5.3 Event subscriptions
+
+Subscribe to message events so the bot can respond to thread replies (welcome message edits):
+
+- `message.channels`
+- `message.groups`
+- `message.im`
+- `message.mpim`
+
+### 5.4 Invite the bot to channels
+
+Make sure the bot user is invited to:
+
+- `CA_PRO_APPLICATION_SLACK_CHANNEL_ID`
+- `CA_PRO_NOTIFICATIONS_SLACK_CHANNEL`
+
+If the bot is not in the channel, Slack posting/updating will fail.
+
+## 6) Cron Worker (Railway)
+
+`cron-worker.js` is designed to run on Railway Cron and call job endpoints on your deployed server.
+
+### Option A: Run `npm run cron` as a Railway Cron service
+
+- Command: `npm run cron`
+- Schedule: e.g. every 5–15 minutes (your preference)
+- Env vars required:
+  - `BASE_URL` (the deployed server URL)
+  - `CRON_SECRET` (must match server)
+
+### Option B: Call job endpoints directly from an external scheduler
+
+All `/api/jobs/*` cron endpoints require `x-cron-secret: <CRON_SECRET>`.
+
+## 7) Quick Smoke Tests
+
+- Server health: `GET /api/jobs/health`
+- Typeform webhook: `GET /api/webhooks/typeform/test`
+- SamCart webhook: `GET /api/webhooks/samcart/test`
+- Calendly webhook: `GET /api/webhooks/calendly/test`
+- Admin UI: `GET /admin` (note: password gate is client-side only)

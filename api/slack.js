@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const slackBlocks = require('../lib/slack-blocks');
 const { openModal, postMessage, deleteMessage } = require('./slack-threads');
 const { gmailService } = require('../lib/gmail');
+const { createApplicationNote, syncApplicationNoteToSlack } = require('../lib/notes');
 
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
@@ -654,6 +655,140 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
     }
 });
 
+// Handle Slack slash commands
+// Currently supported:
+// - /note <text> (preferred: run inside a Typeform application thread in #ca-pro-application)
+// - /note <email|applicationId> <text> (fallback if thread context is unavailable)
+router.post('/commands', verifySlackSignature, async (req, res) => {
+    const pool = req.app.locals.pool;
+
+    try {
+        const command = req.body.command;
+        if (command !== '/note') {
+            return res.status(200).send();
+        }
+
+        const applicationChannelId = process.env.CA_PRO_APPLICATION_SLACK_CHANNEL_ID;
+        const channelId = req.body.channel_id;
+
+        if (applicationChannelId && channelId !== applicationChannelId) {
+            return res.json({
+                response_type: 'ephemeral',
+                text: `Please use /note inside the application threads in <#${applicationChannelId}>.`
+            });
+        }
+
+        const userId = req.body.user_id;
+        const userName = req.body.user_name || 'unknown';
+        const createdBy = `${userName} (<@${userId}>)`;
+
+        const fullText = (req.body.text || '').trim();
+
+        // If Slack includes thread_ts, we can resolve the application from the thread root.
+        const threadTs = req.body.thread_ts || null;
+
+        let applicationId = null;
+        let noteText = fullText;
+        let resolveMode = 'thread';
+
+        if (threadTs) {
+            const appResult = await pool.query(
+                'SELECT id FROM typeform_applications WHERE slack_thread_ts = $1 AND slack_channel_id = $2 LIMIT 1',
+                [threadTs, channelId]
+            );
+            applicationId = appResult.rows[0]?.id || null;
+        }
+
+        // Fallback: allow "/note email@example.com note..." or "/note <applicationId> note..."
+        if (!applicationId) {
+            resolveMode = 'argument';
+
+            const parts = fullText.split(/\s+/);
+            const identifier = parts.shift();
+            noteText = parts.join(' ').trim();
+
+            const looksLikeUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(identifier || '');
+            const looksLikeEmail = (identifier || '').includes('@');
+
+            if (looksLikeUuid) {
+                const appResult = await pool.query(
+                    'SELECT id FROM typeform_applications WHERE id = $1',
+                    [identifier]
+                );
+                applicationId = appResult.rows[0]?.id || null;
+            } else if (looksLikeEmail) {
+                const appResult = await pool.query(
+                    'SELECT id FROM typeform_applications WHERE LOWER(email) = LOWER($1) ORDER BY created_at DESC LIMIT 1',
+                    [identifier]
+                );
+                applicationId = appResult.rows[0]?.id || null;
+            } else {
+                // If we don't have thread context and no identifier, treat the whole text as a note but fail with usage.
+                noteText = fullText;
+            }
+        }
+
+        if (!applicationId) {
+            return res.json({
+                response_type: 'ephemeral',
+                text: 'Could not determine which application this note is for. Try running `/note <text>` inside an application thread, or use `/note email@example.com <text>`.'
+            });
+        }
+
+        if (!noteText || !noteText.trim()) {
+            return res.json({
+                response_type: 'ephemeral',
+                text: 'Note text is required. Usage: `/note <text>`.'
+            });
+        }
+
+        const { note, applicationEmail } = await createApplicationNote({
+            pool,
+            applicationId,
+            noteText,
+            createdBy
+        });
+
+        // Respond quickly to avoid Slack slash command timeouts; sync to Slack threads in the background.
+        res.json({
+            response_type: 'ephemeral',
+            text: `✅ Note saved${applicationEmail ? ` for ${applicationEmail}` : ''}. Syncing to threads... (${resolveMode})`
+        });
+
+        setImmediate(async () => {
+            const syncStatus = await syncApplicationNoteToSlack({
+                pool,
+                applicationId,
+                applicationEmail,
+                noteId: note.id,
+                noteText: note.note_text,
+                createdBy: note.created_by,
+                createdAt: note.created_at
+            });
+
+            try {
+                await pool.query(
+                    'INSERT INTO activity_log (action, entity_type, entity_id, details) VALUES ($1, $2, $3, $4)',
+                    ['note_added', 'typeform_application', applicationId, JSON.stringify({
+                        note_id: note.id,
+                        created_by: createdBy,
+                        source: 'slack_command',
+                        ...syncStatus
+                    })]
+                );
+            } catch (logError) {
+                console.error('Failed to log note_added activity (slack command):', logError.message);
+            }
+        });
+    } catch (error) {
+        console.error('Slack command error:', error);
+        return res.json({
+            response_type: 'ephemeral',
+            text: `Error creating note: ${error.message}`
+        });
+    }
+});
+
 // Handle Slack events (for thread replies)
 router.post('/events', verifySlackSignature, async (req, res) => {
     try {
@@ -682,6 +817,18 @@ router.post('/events', verifySlackSignature, async (req, res) => {
             const channelId = event.channel;
 
             console.log(`[Slack Events] Thread reply in ${channelId}, thread ${threadTs}: "${editRequest?.substring(0, 50)}..."`);
+
+            // Only allow welcome-message editing in the #notifications-capro purchase+welcome threads
+            // (prevents the bot from responding in other channels/threads like #ca-pro-application).
+            const notificationsChannelId = process.env.CA_PRO_NOTIFICATIONS_SLACK_CHANNEL;
+            if (!notificationsChannelId) {
+                console.log('[Slack Events] CA_PRO_NOTIFICATIONS_SLACK_CHANNEL not set - skipping welcome edit handling');
+                return;
+            }
+            if (channelId !== notificationsChannelId) {
+                console.log(`[Slack Events] Skipping thread reply - channel ${channelId} is not notifications channel ${notificationsChannelId}`);
+                return;
+            }
 
             // Get the full thread to find the welcome message
             const historyResponse = await fetch(`https://slack.com/api/conversations.replies?channel=${channelId}&ts=${threadTs}&include_all_metadata=true`, {
@@ -758,15 +905,9 @@ router.post('/events', verifySlackSignature, async (req, res) => {
                     typeformReferralSource: typeformData.referral_source || ''
                 };
             } else {
-                // 2. Fallback: Try to get member data from message metadata (original welcome message flow)
-                for (const msg of historyData.messages) {
-                    const hasWelcomeMetadata = msg.metadata?.event_type === 'welcome_message';
-                    if (hasWelcomeMetadata && msg.metadata?.event_payload) {
-                        memberData = msg.metadata.event_payload;
-                        console.log('[Slack Events] Found member data from message metadata');
-                        break;
-                    }
-                }
+                // Not a SamCart purchase thread we manage - ignore silently
+                console.log('[Slack Events] No matching SamCart order for this thread - skipping welcome edit handling');
+                return;
             }
 
             // Find the MOST RECENT welcome message from the bot (for iterative editing)

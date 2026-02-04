@@ -1,28 +1,35 @@
 /* CSS Variables */
 :root {
-    --bg-color: #f8f9fa;
-    --primary-orange: #f59e0b;
-    --primary-orange-dark: #d97706;
-    --black: #111827;
+    /* Vibe / Monday-inspired palette */
+    --bg-color: #f6f7fb;
+    --primary-orange: #0073ea; /* primary */
+    --primary-orange-dark: #0060c8; /* primary hover */
+    --black: #323338;
     --white: #ffffff;
-    --gray-50: #f9fafb;
-    --gray-100: #f3f4f6;
-    --gray-200: #e5e7eb;
-    --gray-300: #d1d5db;
-    --gray-400: #9ca3af;
-    --gray-500: #6b7280;
-    --gray-600: #4b5563;
-    --gray-700: #374151;
-    --gray-800: #1f2937;
-    --green: #10b981;
-    --red: #ef4444;
-    --blue: #3b82f6;
-    --yellow: #f59e0b;
+    --gray-50: #f5f6f8;
+    --gray-100: #edf0f5;
+    --gray-200: #e6e9ef;
+    --gray-300: #d0d4e4;
+    --gray-400: #a0a7b5;
+    --gray-500: #676879;
+    --gray-600: #4b4c56;
+    --gray-700: #323338;
+    --gray-800: #202125;
+    --green: #00c875;
+    --red: #e2445c;
+    --blue: #0073ea;
+    --yellow: #ffcb00;
+
+    /* Aliases used by inline modal styles */
+    --orange: var(--primary-orange);
+    --border: var(--gray-200);
+    --text-secondary: var(--gray-500);
+
     --sidebar-width: 260px;
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
-    --shadow: 0 1px 3px rgba(0, 0, 0, 0.1), 0 1px 2px rgba(0, 0, 0, 0.06);
-    --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.1), 0 2px 4px rgba(0, 0, 0, 0.06);
-    --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.1), 0 4px 6px rgba(0, 0, 0, 0.05);
+    --shadow-sm: 0 1px 0 rgba(0, 0, 0, 0.06);
+    --shadow: 0 1px 8px rgba(0, 0, 0, 0.06);
+    --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.08);
+    --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.14);
 }
 
 /* Reset & Base */
@@ -33,9 +40,9 @@
 }
 
 body {
-    font-family: 'Roboto', -apple-system, BlinkMacSystemFont, sans-serif;
+    font-family: 'Inter', 'Roboto', -apple-system, BlinkMacSystemFont, sans-serif;
     background-color: var(--bg-color);
-    color: var(--gray-800);
+    color: var(--gray-700);
     line-height: 1.5;
 }
 
@@ -48,13 +55,14 @@ body {
 /* Sidebar */
 .sidebar {
     width: var(--sidebar-width);
-    background: var(--black);
-    color: var(--white);
+    background: var(--white);
+    color: var(--gray-700);
     display: flex;
     flex-direction: column;
     position: fixed;
     height: 100vh;
     z-index: 100;
+    border-right: 1px solid var(--gray-200);
 }
 
 .sidebar-header {
@@ -62,13 +70,14 @@ body {
     display: flex;
     align-items: center;
     gap: 12px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    border-bottom: 1px solid var(--gray-200);
 }
 
 .sidebar-header h1 {
-    font-family: 'Montserrat', sans-serif;
+    font-family: 'Inter', sans-serif;
     font-size: 1.5rem;
     font-weight: 700;
+    color: var(--gray-800);
 }
 
 .badge {
@@ -77,7 +86,7 @@ body {
     font-size: 0.7rem;
     font-weight: 600;
     padding: 4px 8px;
-    border-radius: 4px;
+    border-radius: 999px;
     text-transform: uppercase;
 }
 
@@ -94,7 +103,7 @@ body {
     align-items: center;
     gap: 12px;
     padding: 12px 16px;
-    color: var(--gray-400);
+    color: var(--gray-600);
     text-decoration: none;
     border-radius: 8px;
     font-size: 0.95rem;
@@ -109,13 +118,13 @@ body {
 }
 
 .nav-item:hover {
-    background: rgba(255, 255, 255, 0.1);
-    color: var(--white);
+    background: var(--gray-50);
+    color: var(--gray-800);
 }
 
 .nav-item.active {
-    background: var(--primary-orange);
-    color: var(--white);
+    background: rgba(0, 115, 234, 0.12);
+    color: var(--primary-orange);
 }
 
 .nav-badge {
@@ -131,8 +140,8 @@ body {
 }
 
 .nav-item.active .nav-badge {
-    background: var(--white);
-    color: var(--primary-orange);
+    background: var(--red);
+    color: var(--white);
 }
 
 .sidebar-footer {
@@ -144,7 +153,7 @@ body {
     display: flex;
     align-items: center;
     gap: 8px;
-    color: var(--gray-400);
+    color: var(--gray-600);
     text-decoration: none;
     font-size: 0.9rem;
     padding: 8px;
@@ -153,8 +162,8 @@ body {
 }
 
 .back-link:hover {
-    color: var(--white);
-    background: rgba(255, 255, 255, 0.1);
+    color: var(--gray-800);
+    background: var(--gray-50);
 }
 
 .back-link svg {
@@ -181,7 +190,7 @@ body {
 }
 
 .content-header h2 {
-    font-family: 'Montserrat', sans-serif;
+    font-family: 'Inter', sans-serif;
     font-size: 1.75rem;
     font-weight: 700;
     color: var(--gray-800);
@@ -294,6 +303,7 @@ body {
 .filter-select:focus {
     outline: none;
     border-color: var(--primary-orange);
+    box-shadow: 0 0 0 3px rgba(0, 115, 234, 0.18);
 }
 
 /* Stats Grid */
@@ -311,7 +321,8 @@ body {
     display: flex;
     align-items: center;
     gap: 16px;
-    box-shadow: var(--shadow);
+    border: 1px solid var(--gray-200);
+    box-shadow: var(--shadow-sm);
 }
 
 .stat-icon {
@@ -343,7 +354,7 @@ body {
 .stat-value {
     font-size: 1.75rem;
     font-weight: 700;
-    font-family: 'Montserrat', sans-serif;
+    font-family: 'Inter', sans-serif;
     color: var(--gray-800);
 }
 
@@ -357,11 +368,12 @@ body {
     background: var(--white);
     border-radius: 12px;
     padding: 20px;
-    box-shadow: var(--shadow);
+    border: 1px solid var(--gray-200);
+    box-shadow: var(--shadow-sm);
 }
 
 .card h3 {
-    font-family: 'Montserrat', sans-serif;
+    font-family: 'Inter', sans-serif;
     font-size: 1.1rem;
     font-weight: 600;
     margin-bottom: 16px;
@@ -487,7 +499,8 @@ body {
 .table-container {
     background: var(--white);
     border-radius: 12px;
-    box-shadow: var(--shadow);
+    border: 1px solid var(--gray-200);
+    box-shadow: var(--shadow-sm);
     overflow-x: auto;
 }
 
@@ -513,12 +526,15 @@ body {
     background: var(--gray-50);
     padding: 14px 16px;
     text-align: left;
-    font-size: 0.8rem;
+    font-size: 0.85rem;
     font-weight: 600;
     color: var(--gray-500);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    text-transform: none;
+    letter-spacing: normal;
     border-bottom: 1px solid var(--gray-200);
+    position: sticky;
+    top: 0;
+    z-index: 2;
 }
 
 .data-table td {
@@ -529,7 +545,11 @@ body {
 }
 
 .data-table tbody tr:hover {
-    background: var(--gray-50);
+    background: rgba(0, 115, 234, 0.04);
+}
+
+.data-table tbody tr.clickable-row {
+    cursor: pointer;
 }
 
 .data-table tbody tr:last-child td {
@@ -568,6 +588,7 @@ body {
 .status-badge.onboarding_started { background: #e9d5ff; color: #6b21a8; }
 .status-badge.onboarding_complete { background: #d1fae5; color: #065f46; }
 .status-badge.onboarding_complete::after { content: ' '; }
+.status-badge.joined { background: #dcfce7; color: #166534; }
 
 /* Action Buttons */
 .action-btns {
@@ -744,13 +765,14 @@ body {
     border-radius: 12px;
     padding: 24px;
     text-align: center;
-    box-shadow: var(--shadow);
+    border: 1px solid var(--gray-200);
+    box-shadow: var(--shadow-sm);
 }
 
 .onboarding-stat-value {
     font-size: 2.5rem;
     font-weight: 700;
-    font-family: 'Montserrat', sans-serif;
+    font-family: 'Inter', sans-serif;
 }
 
 .onboarding-stat-label {
@@ -800,7 +822,7 @@ body {
 }
 
 .modal-header h3 {
-    font-family: 'Montserrat', sans-serif;
+    font-family: 'Inter', sans-serif;
     font-size: 1.25rem;
     font-weight: 600;
 }
@@ -1108,7 +1130,7 @@ body {
 }
 
 .password-header h1 {
-    font-family: 'Montserrat', sans-serif;
+    font-family: 'Inter', sans-serif;
     font-size: 1.75rem;
     font-weight: 700;
     color: var(--gray-800);
@@ -1139,7 +1161,7 @@ body {
 #password-input:focus {
     outline: none;
     border-color: var(--primary-orange);
-    box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.1);
+    box-shadow: 0 0 0 3px rgba(0, 115, 234, 0.18);
 }
 
 #password-form .btn {
@@ -1164,7 +1186,7 @@ body {
 }
 
 .notes-section h4 {
-    font-family: 'Montserrat', sans-serif;
+    font-family: 'Inter', sans-serif;
     font-size: 1rem;
     font-weight: 600;
     margin-bottom: 12px;

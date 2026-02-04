@@ -246,6 +246,36 @@ async function sendWelcomeThread(samcartOrder, typeformData, pool) {
     await new Promise(resolve => setTimeout(resolve, 300));
   }
 
+  // Post any existing application notes into the Purchase/Welcome thread (if available)
+  // This ensures notes added before purchase show up in #notifications-capro.
+  if (typeformData?.id) {
+    try {
+      const notesResult = await pool.query(
+        `
+          SELECT note_text, created_by, created_at
+          FROM application_notes
+          WHERE application_id = $1
+          ORDER BY created_at DESC
+          LIMIT 5
+        `,
+        [typeformData.id]
+      );
+
+      if (notesResult.rows.length > 0) {
+        const slackBlocks = require('../lib/slack-blocks');
+        const notesOldestFirst = [...notesResult.rows].reverse();
+
+        for (const note of notesOldestFirst) {
+          const noteBlock = slackBlocks.createNoteAddedBlock(note.note_text, note.created_by, note.created_at);
+          await sendMessage(noteBlock.blocks, noteBlock.text);
+          await new Promise(resolve => setTimeout(resolve, 200));
+        }
+      }
+    } catch (e) {
+      console.log(`[Welcome] Could not post application notes: ${e.message}`);
+    }
+  }
+
   // Thread message 2: Note about OnboardingChat status
   const noteResponse = await sendMessage([
     {

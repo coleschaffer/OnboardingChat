@@ -16,6 +16,7 @@ router.get('/', async (req, res) => {
           WHERE LOWER(bo.email) = LOWER(ta.email)
         ) THEN true ELSE false END as has_onboarding,
         CASE
+          WHEN ta.whatsapp_joined_at IS NOT NULL THEN 'joined'
           WHEN ta.onboarding_completed_at IS NOT NULL THEN 'onboarding_complete'
           WHEN ta.onboarding_started_at IS NOT NULL THEN 'onboarding_started'
           WHEN ta.purchased_at IS NOT NULL THEN 'purchased'
@@ -24,7 +25,7 @@ router.get('/', async (req, res) => {
           WHEN ta.emailed_at IS NOT NULL THEN 'emailed'
           ELSE 'new'
         END as display_status,
-        COALESCE(ta.onboarding_completed_at, ta.onboarding_started_at, ta.purchased_at, ta.call_booked_at, ta.replied_at, ta.emailed_at) as status_timestamp,
+        COALESCE(ta.whatsapp_joined_at, ta.onboarding_completed_at, ta.onboarding_started_at, ta.purchased_at, ta.call_booked_at, ta.replied_at, ta.emailed_at) as status_timestamp,
         (SELECT COUNT(*) FROM application_notes WHERE application_id = ta.id) as note_count
       FROM typeform_applications ta
       WHERE 1=1
@@ -114,6 +115,7 @@ router.get('/:id', async (req, res) => {
     const result = await pool.query(`
       SELECT ta.*,
         CASE
+          WHEN ta.whatsapp_joined_at IS NOT NULL THEN 'joined'
           WHEN ta.onboarding_completed_at IS NOT NULL THEN 'onboarding_complete'
           WHEN ta.onboarding_started_at IS NOT NULL THEN 'onboarding_started'
           WHEN ta.purchased_at IS NOT NULL THEN 'purchased'
@@ -122,7 +124,7 @@ router.get('/:id', async (req, res) => {
           WHEN ta.emailed_at IS NOT NULL THEN 'emailed'
           ELSE 'new'
         END as display_status,
-        COALESCE(ta.onboarding_completed_at, ta.onboarding_started_at, ta.purchased_at, ta.call_booked_at, ta.replied_at, ta.emailed_at) as status_timestamp
+        COALESCE(ta.whatsapp_joined_at, ta.onboarding_completed_at, ta.onboarding_started_at, ta.purchased_at, ta.call_booked_at, ta.replied_at, ta.emailed_at) as status_timestamp
       FROM typeform_applications ta
       WHERE ta.id = $1
     `, [id]);

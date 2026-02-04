@@ -298,7 +298,7 @@ function formatActivityText(activity) {
         case 'application_status_changed':
             return `Application status changed to <strong>${details.status}</strong>: ${details.name || 'Unknown'}`;
         case 'onboarding_completed':
-            return `Onboarding completed: <strong>${details.business || 'Unknown'}</strong>`;
+            return `Chat completed: <strong>${details.business_name || details.business || details.email || 'Unknown'}</strong>`;
         case 'csv_import':
             return `CSV imported: ${details.imported} ${details.type} records`;
         case 'typeform_sync':
@@ -339,6 +339,8 @@ function formatActivityText(activity) {
             return `Email reply sent to <strong>${details.email || 'Unknown'}</strong>`;
         case 'call_booked':
             return `Call booked: <strong>${details.email || 'Unknown'}</strong>`;
+        case 'whatsapp_joined':
+            return `WhatsApp joined: <strong>${details.email || details.business_name || 'Unknown'}</strong>`;
         case 'note_added':
             return `Note added by <strong>${details.created_by || 'admin'}</strong>`;
         case 'slack_thread_created':
@@ -418,7 +420,7 @@ async function loadApplications() {
                 const noteCount = app.note_count || 0;
 
                 return `
-                <tr>
+                <tr class="clickable-row" onclick="viewApplication('${app.id}')">
                     <td><strong>${app.first_name || ''} ${app.last_name || ''}</strong></td>
                     <td>${app.email || '-'}</td>
                     <td>${app.annual_revenue || '-'}</td>
@@ -429,7 +431,7 @@ async function loadApplications() {
                         </div>
                     </td>
                     <td>
-                        <button class="notes-btn ${noteCount > 0 ? 'has-notes' : ''}" onclick="openNotesPanel('${app.id}', '${escapeHtml((app.first_name || '') + ' ' + (app.last_name || ''))}')" title="${noteCount > 0 ? noteCount + ' note(s)' : 'Add note'}">
+                        <button class="notes-btn ${noteCount > 0 ? 'has-notes' : ''}" onclick="event.stopPropagation(); openNotesPanel('${app.id}', '${escapeHtml((app.first_name || '') + ' ' + (app.last_name || ''))}')" title="${noteCount > 0 ? noteCount + ' note(s)' : 'Add note'}">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
                                 <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
@@ -448,14 +450,14 @@ async function loadApplications() {
                                 </svg>
                             </button>
                             <div class="kebab-dropdown" id="kebab-app-${app.id}">
-                                <button class="kebab-dropdown-item" onclick="viewApplication('${app.id}')">
+                                <button class="kebab-dropdown-item" onclick="event.stopPropagation(); viewApplication('${app.id}')">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
                                         <circle cx="12" cy="12" r="3"/>
                                     </svg>
                                     View Data
                                 </button>
-                                <button class="kebab-dropdown-item danger" onclick="deleteApplication('${app.id}')">
+                                <button class="kebab-dropdown-item danger" onclick="event.stopPropagation(); deleteApplication('${app.id}')">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <polyline points="3 6 5 6 21 6"/>
                                         <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
@@ -568,8 +570,9 @@ async function viewApplication(id) {
             ${app.emailed_at ? `<div class="detail-row"><span class="detail-label">Emailed</span><span class="detail-value">${formatDate(app.emailed_at)}</span></div>` : ''}
             ${app.replied_at ? `<div class="detail-row"><span class="detail-label">Replied</span><span class="detail-value">${formatDate(app.replied_at)}</span></div>` : ''}
             ${app.call_booked_at ? `<div class="detail-row"><span class="detail-label">Call Booked</span><span class="detail-value">${formatDate(app.call_booked_at)}</span></div>` : ''}
-            ${app.onboarding_started_at ? `<div class="detail-row"><span class="detail-label">Onboarding Started</span><span class="detail-value">${formatDate(app.onboarding_started_at)}</span></div>` : ''}
-            ${app.onboarding_completed_at ? `<div class="detail-row"><span class="detail-label">Onboarding Complete</span><span class="detail-value">${formatDate(app.onboarding_completed_at)}</span></div>` : ''}
+            ${app.onboarding_started_at ? `<div class="detail-row"><span class="detail-label">Chat Started</span><span class="detail-value">${formatDate(app.onboarding_started_at)}</span></div>` : ''}
+            ${app.onboarding_completed_at ? `<div class="detail-row"><span class="detail-label">Chat Complete</span><span class="detail-value">${formatDate(app.onboarding_completed_at)}</span></div>` : ''}
+            ${app.whatsapp_joined_at ? `<div class="detail-row"><span class="detail-label">WhatsApp Joined</span><span class="detail-value">${formatDate(app.whatsapp_joined_at)}</span></div>` : ''}
 
             ${renderNotesSection(notes, id)}
         `);
@@ -627,7 +630,7 @@ async function loadMembers() {
             tbody.innerHTML = '<tr><td colspan="7" class="loading">No members found</td></tr>';
         } else {
             tbody.innerHTML = data.members.map(member => `
-                <tr>
+                <tr class="clickable-row" onclick="viewMember('${member.id}')">
                     <td><strong>${member.first_name || ''} ${member.last_name || ''}</strong></td>
                     <td>${member.business_name || '-'}</td>
                     <td>${member.email || '-'}</td>
@@ -644,14 +647,14 @@ async function loadMembers() {
                                 </svg>
                             </button>
                             <div class="kebab-dropdown" id="kebab-member-${member.id}">
-                                <button class="kebab-dropdown-item" onclick="viewMember('${member.id}')">
+                                <button class="kebab-dropdown-item" onclick="event.stopPropagation(); viewMember('${member.id}')">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
                                         <circle cx="12" cy="12" r="3"/>
                                     </svg>
                                     View Data
                                 </button>
-                                <button class="kebab-dropdown-item danger" onclick="deleteMember('${member.id}')">
+                                <button class="kebab-dropdown-item danger" onclick="event.stopPropagation(); deleteMember('${member.id}')">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <polyline points="3 6 5 6 21 6"/>
                                         <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
@@ -809,7 +812,7 @@ async function loadTeamMembers() {
             tbody.innerHTML = '<tr><td colspan="6" class="loading">No team members found</td></tr>';
         } else {
             tbody.innerHTML = data.team_members.map(tm => `
-                <tr>
+                <tr class="clickable-row" onclick="viewTeamMember('${tm.id}')">
                     <td><strong>${tm.first_name || ''} ${tm.last_name || ''}</strong></td>
                     <td>${tm.email || '-'}</td>
                     <td>${tm.role || tm.title || '-'}</td>
@@ -831,14 +834,14 @@ async function loadTeamMembers() {
                                 </svg>
                             </button>
                             <div class="kebab-dropdown" id="kebab-tm-${tm.id}">
-                                <button class="kebab-dropdown-item" onclick="viewTeamMember('${tm.id}')">
+                                <button class="kebab-dropdown-item" onclick="event.stopPropagation(); viewTeamMember('${tm.id}')">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
                                         <circle cx="12" cy="12" r="3"/>
                                     </svg>
                                     View Data
                                 </button>
-                                <button class="kebab-dropdown-item danger" onclick="deleteTeamMember('${tm.id}')">
+                                <button class="kebab-dropdown-item danger" onclick="event.stopPropagation(); deleteTeamMember('${tm.id}')">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <polyline points="3 6 5 6 21 6"/>
                                         <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
@@ -969,7 +972,7 @@ async function loadOnboarding() {
                 const displayTitle = memberName ? `${memberName} (${sub.session_id || ''})` : (sub.session_id || '');
 
                 return `
-                <tr>
+                <tr class="clickable-row" onclick="viewSubmission('${sub.id}')">
                     <td title="${displayTitle}">${displayName}</td>
                     <td>
                         <div style="display: flex; align-items: center; gap: 8px;">
@@ -992,20 +995,20 @@ async function loadOnboarding() {
                                 </svg>
                             </button>
                             <div class="kebab-dropdown" id="kebab-${sub.id}">
-                                <button class="kebab-dropdown-item" onclick="viewSubmission('${sub.id}')">
+                                <button class="kebab-dropdown-item" onclick="event.stopPropagation(); viewSubmission('${sub.id}')">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
                                         <circle cx="12" cy="12" r="3"/>
                                     </svg>
                                     View Data
                                 </button>
-                                <button class="kebab-dropdown-item success" onclick="markSubmissionComplete('${sub.id}')">
+                                <button class="kebab-dropdown-item success" onclick="event.stopPropagation(); markSubmissionComplete('${sub.id}')">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <polyline points="20 6 9 17 4 12"/>
                                     </svg>
                                     Mark Complete
                                 </button>
-                                <button class="kebab-dropdown-item danger" onclick="deleteSubmission('${sub.id}')">
+                                <button class="kebab-dropdown-item danger" onclick="event.stopPropagation(); deleteSubmission('${sub.id}')">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <polyline points="3 6 5 6 21 6"/>
                                         <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
@@ -1355,8 +1358,9 @@ function formatDisplayStatus(status, timestamp) {
         'replied': 'Replied',
         'call_booked': 'Call Booked',
         'purchased': 'Purchased',
-        'onboarding_started': 'Onboarding Started',
-        'onboarding_complete': 'Onboarding Complete'
+        'onboarding_started': 'Chat Started',
+        'onboarding_complete': 'Chat Complete',
+        'joined': 'Joined (WhatsApp)'
     };
 
     const text = statusLabels[status] || status.replace(/_/g, ' ');

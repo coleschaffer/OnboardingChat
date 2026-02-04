@@ -3,6 +3,8 @@
 
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+-- gen_random_uuid() is used by runtime-created tables (server.js runMigrations)
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- Business Owners table
 CREATE TABLE IF NOT EXISTS business_owners (
@@ -24,6 +26,7 @@ CREATE TABLE IF NOT EXISTS business_owners (
     headshot_url TEXT,
     whatsapp_number VARCHAR(100),
     whatsapp_joined BOOLEAN DEFAULT FALSE,
+    whatsapp_joined_at TIMESTAMP WITH TIME ZONE,
     mailing_address JSONB,
     apparel_sizes JSONB,
     anything_else TEXT,
@@ -84,6 +87,7 @@ CREATE TABLE IF NOT EXISTS typeform_applications (
     decision_timeline VARCHAR(100),
     has_team BOOLEAN,
     additional_info TEXT,
+    whatsapp_joined_at TIMESTAMP WITH TIME ZONE,
     referral_source VARCHAR(255),
     status VARCHAR(50) DEFAULT 'new' CHECK (status IN ('new', 'reviewed', 'approved', 'rejected')),
     raw_data JSONB,
