@@ -335,18 +335,53 @@ async function postReplyNotification(pool, applicationId, recipientName, recipie
 
     const { slack_channel_id, slack_thread_ts } = result.rows[0];
 
-    const replyBlock = slackBlocks.createEmailReplyBlock(
+    const replyBlock = slackBlocks.createEmailReplyBlock({
         recipientName,
         recipientEmail,
         replySnippet,
         replyBody,
         threadId,
-        applicationId,
+        contextType: 'typeform_application',
+        contextId: applicationId,
         stefanSlackId
-    );
+    });
 
     const response = await postMessage(slack_channel_id, replyBlock.text, replyBlock.blocks, slack_thread_ts);
 
+    return response;
+}
+
+/**
+ * Post email reply notification to a specific Slack thread (non-Typeform context)
+ */
+async function postReplyNotificationToThread({
+    channelId,
+    threadTs,
+    recipientName,
+    recipientEmail,
+    replySnippet,
+    replyBody,
+    threadId,
+    contextType,
+    contextId
+}) {
+    const slackBlocks = require('../lib/slack-blocks');
+    const stefanSlackId = process.env.STEF_SLACK_MEMBER_ID;
+
+    if (!channelId || !threadTs) return null;
+
+    const replyBlock = slackBlocks.createEmailReplyBlock({
+        recipientName,
+        recipientEmail,
+        replySnippet,
+        replyBody,
+        threadId,
+        contextType,
+        contextId,
+        stefanSlackId
+    });
+
+    const response = await postMessage(channelId, replyBlock.text, replyBlock.blocks, threadTs);
     return response;
 }
 
@@ -725,6 +760,7 @@ module.exports = {
     postApplicationNotification,
     createApplicationThread,
     postReplyNotification,
+    postReplyNotificationToThread,
     postCallBookedNotification,
     postOnboardingUpdateToWelcomeThread,
     postNoteToThread,

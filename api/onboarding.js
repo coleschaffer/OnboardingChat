@@ -4,7 +4,9 @@ const { v4: uuidv4 } = require('uuid');
 const { syncTeamMembers, syncPartners } = require('./activecampaign');
 const { syncTeamMembersToCircle, syncPartnersToCircle } = require('./circle');
 const { updateBusinessOwnerCompany } = require('./monday');
-const { postOnboardingUpdateToWelcomeThread } = require('./slack-threads');
+const { postOnboardingUpdateToWelcomeThread, postMessage } = require('./slack-threads');
+const { addContactsToGroups, buildWhatsAppAddSummary } = require('../lib/whatsapp-actions');
+const { resolveGroupKeysForRole } = require('../lib/whatsapp-groups');
 
 /**
  * Update Monday.com Company field when onboarding completes
@@ -77,6 +79,41 @@ async function updateMondayCompanyField(pool, answers) {
       })
     ]);
   }
+}
+
+async function postWhatsAppAddSummaryToThread(pool, email, label, groupKeys, contacts) {
+  if (!email) return false;
+
+  const orderResult = await pool.query(
+    `
+      SELECT slack_channel_id, slack_thread_ts
+      FROM samcart_orders
+      WHERE LOWER(email) = LOWER($1)
+        AND slack_channel_id IS NOT NULL
+        AND slack_thread_ts IS NOT NULL
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    [email]
+  );
+
+  const order = orderResult.rows[0];
+  if (!order) return false;
+
+  const addResult = await addContactsToGroups({ contacts, groupKeys });
+  const summaryText = buildWhatsAppAddSummary({
+    label,
+    groupResults: addResult.groupResults,
+    participantsCount: addResult.participants.length,
+    skipped: addResult.skipped,
+    missingGroupKeys: addResult.missingGroupKeys
+  });
+
+  await postMessage(order.slack_channel_id, summaryText, [
+    { type: 'section', text: { type: 'mrkdwn', text: summaryText } }
+  ], order.slack_thread_ts);
+
+  return true;
 }
 
 // Helper to send Slack welcome message as a thread
@@ -707,6 +744,17 @@ router.post('/save-progress', async (req, res) => {
         syncTeamMembers(newTeamMembers, pool).catch(err => {
           console.error('Failed to sync team members to ActiveCampaign:', err);
         });
+
+        if (answers?.email) {
+          const contacts = newTeamMembers.map(member => ({
+            name: member.name || [member.firstName, member.lastName].filter(Boolean).join(' ') || member.email,
+            email: member.email,
+            phone: member.phone
+          }));
+          const groupKeys = resolveGroupKeysForRole('team_member');
+          postWhatsAppAddSummaryToThread(pool, answers.email, 'Team members added', groupKeys, contacts)
+            .catch(err => console.error('[WhatsApp Add] Failed to add team members:', err.message));
+        }
       }
     }
 
@@ -728,6 +776,17 @@ router.post('/save-progress', async (req, res) => {
         syncPartners(newPartners, pool).catch(err => {
           console.error('Failed to sync partners to ActiveCampaign:', err);
         });
+
+        if (answers?.email) {
+          const contacts = newPartners.map(partner => ({
+            name: partner.name || [partner.firstName, partner.lastName].filter(Boolean).join(' ') || partner.email,
+            email: partner.email,
+            phone: partner.phone
+          }));
+          const groupKeys = resolveGroupKeysForRole('partner');
+          postWhatsAppAddSummaryToThread(pool, answers.email, 'Partners added', groupKeys, contacts)
+            .catch(err => console.error('[WhatsApp Add] Failed to add partners:', err.message));
+        }
       }
     }
 

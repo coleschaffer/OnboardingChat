@@ -438,6 +438,100 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
             return res.status(200).send();
         }
 
+        if ((payload.type === 'message_action' || payload.type === 'shortcut') && payload.callback_id === 'add_cancel_reason') {
+            const pool = req.app.locals.pool;
+            const triggerId = payload.trigger_id;
+            const channelId = payload.channel?.id;
+            const message = payload.message || null;
+
+            if (!channelId || !message?.ts) {
+                return res.status(200).send();
+            }
+
+            const notificationsChannelId = process.env.CA_PRO_NOTIFICATIONS_SLACK_CHANNEL;
+            if (notificationsChannelId && channelId !== notificationsChannelId) {
+                return res.status(200).send();
+            }
+
+            const threadTs = message.thread_ts || message.ts;
+
+            let memberEmail = null;
+            let memberName = null;
+            let memberThreadId = null;
+
+            try {
+                const threadResult = await pool.query(
+                    'SELECT id, member_email, member_name FROM member_threads WHERE slack_channel_id = $1 AND slack_thread_ts = $2 LIMIT 1',
+                    [channelId, threadTs]
+                );
+                if (threadResult.rows[0]) {
+                    memberThreadId = threadResult.rows[0].id;
+                    memberEmail = threadResult.rows[0].member_email;
+                    memberName = threadResult.rows[0].member_name;
+                }
+            } catch (dbErr) {
+                console.error('Error resolving member thread for cancel reason shortcut:', dbErr.message);
+            }
+
+            if (!memberEmail) {
+                memberEmail = extractEmailFromSlackMessage(message);
+            }
+
+            if (!memberEmail && threadTs) {
+                try {
+                    const historyResponse = await fetch(`https://slack.com/api/conversations.replies?channel=${channelId}&ts=${threadTs}&limit=1`, {
+                        headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}` }
+                    });
+                    const historyData = await historyResponse.json();
+                    if (historyData.ok && Array.isArray(historyData.messages) && historyData.messages.length > 0) {
+                        memberEmail = extractEmailFromSlackMessage(historyData.messages[0]);
+                    }
+                } catch (fetchErr) {
+                    console.error('Error fetching thread root for cancel reason shortcut:', fetchErr.message);
+                }
+            }
+
+            const view = {
+                type: 'modal',
+                callback_id: 'add_cancel_reason_modal',
+                title: { type: 'plain_text', text: 'Cancel Reason' },
+                submit: { type: 'plain_text', text: 'Save' },
+                close: { type: 'plain_text', text: 'Cancel' },
+                private_metadata: JSON.stringify({
+                    channelId,
+                    threadTs,
+                    memberEmail,
+                    memberName,
+                    memberThreadId
+                }),
+                blocks: [
+                    {
+                        type: 'context',
+                        elements: [
+                            {
+                                type: 'mrkdwn',
+                                text: `Adding a cancellation reason for *${memberName || memberEmail || 'this member'}*`
+                            }
+                        ]
+                    },
+                    {
+                        type: 'input',
+                        block_id: 'cancel_reason_block',
+                        label: { type: 'plain_text', text: 'Reason' },
+                        element: {
+                            type: 'plain_text_input',
+                            action_id: 'cancel_reason',
+                            multiline: true,
+                            placeholder: { type: 'plain_text', text: 'Why are they canceling?' }
+                        }
+                    }
+                ]
+            };
+
+            await openModal(triggerId, view);
+            return res.status(200).send();
+        }
+
         // Handle block actions (button clicks)
         if (payload.type === 'block_actions') {
             const action = payload.actions[0];
@@ -524,11 +618,14 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
             // Handle "Send Reply" button click - open modal
             if (action.action_id === 'open_send_message_modal') {
                 const actionData = JSON.parse(action.value);
+                const contextType = actionData.contextType || (actionData.applicationId ? 'typeform_application' : null) || 'typeform_application';
+                const contextId = actionData.contextId || actionData.applicationId || null;
                 const modal = slackBlocks.createSendMessageModal(
                     actionData.recipientName,
                     actionData.recipientEmail,
                     actionData.threadId,
-                    actionData.applicationId
+                    contextType,
+                    contextId
                 );
                 await openModal(triggerId, modal);
                 return res.status(200).send();
@@ -621,6 +718,25 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
             const privateMetadata = JSON.parse(payload.view.private_metadata);
             const messageText = payload.view.state.values.message_block.message_input.value;
             const userId = payload.user.id;
+            const contextType = privateMetadata.contextType || (privateMetadata.applicationId ? 'typeform_application' : null);
+            const contextId = privateMetadata.contextId || privateMetadata.applicationId || null;
+            const typeformApplicationId = contextType === 'typeform_application' ? contextId : null;
+
+            let replySubject = 'Re: Thanks for applying to CA Pro';
+            if (privateMetadata.threadId) {
+                try {
+                    const subjectResult = await pool.query(
+                        'SELECT subject FROM email_threads WHERE gmail_thread_id = $1 ORDER BY created_at DESC LIMIT 1',
+                        [privateMetadata.threadId]
+                    );
+                    const threadSubject = subjectResult.rows[0]?.subject;
+                    if (threadSubject) {
+                        replySubject = threadSubject.toLowerCase().startsWith('re:') ? threadSubject : `Re: ${threadSubject}`;
+                    }
+                } catch (err) {
+                    console.error('Error fetching email thread subject:', err.message);
+                }
+            }
 
             // Insert pending email with 10-second delay
             const UNDO_DELAY_MS = 10000; // 10 seconds
@@ -629,15 +745,18 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
             const result = await pool.query(`
                 INSERT INTO pending_email_sends (
                     to_email, subject, body, gmail_thread_id, typeform_application_id,
+                    context_type, context_id,
                     user_id, channel_id, thread_ts, send_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 RETURNING id
             `, [
                 privateMetadata.recipientEmail,
-                'Re: Thanks for applying to CA Pro',
+                replySubject,
                 messageText,
                 privateMetadata.threadId,
-                privateMetadata.applicationId,
+                typeformApplicationId,
+                contextType,
+                contextId,
                 userId,
                 '', // We'll update with channel from application
                 null, // thread_ts
@@ -647,16 +766,24 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
             const pendingEmailId = result.rows[0].id;
 
             // Get the application's slack thread info
-            const appResult = await pool.query(
-                'SELECT slack_channel_id, slack_thread_ts FROM typeform_applications WHERE id = $1',
-                [privateMetadata.applicationId]
-            );
+            let appResult = null;
+            if (contextType === 'typeform_application' && typeformApplicationId) {
+                appResult = await pool.query(
+                    'SELECT slack_channel_id, slack_thread_ts FROM typeform_applications WHERE id = $1',
+                    [typeformApplicationId]
+                );
+            } else if (contextType === 'yearly_renewal' && contextId) {
+                appResult = await pool.query(
+                    'SELECT slack_channel_id, slack_thread_ts FROM member_threads WHERE id = $1',
+                    [contextId]
+                );
+            }
 
             let sendingMessageTs = null;
             let channelId = null;
             let threadTs = null;
 
-            if (appResult.rows[0]?.slack_channel_id) {
+            if (appResult?.rows?.[0]?.slack_channel_id) {
                 channelId = appResult.rows[0].slack_channel_id;
                 threadTs = appResult.rows[0].slack_thread_ts;
 
@@ -742,7 +869,7 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
                     await pool.query(`
                         INSERT INTO activity_log (action, entity_type, entity_id, details)
                         VALUES ($1, $2, $3, $4)
-                    `, ['email_reply_sent', 'typeform_application', pending.typeform_application_id, JSON.stringify({
+                    `, ['email_reply_sent', pending.context_type || 'typeform_application', pending.context_id || pending.typeform_application_id, JSON.stringify({
                         email: pending.to_email,
                         gmail_thread_id: emailResult.threadId,
                         user_id: pending.user_id
@@ -929,6 +1056,120 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
                     );
                 } catch (logError) {
                     console.error('Failed to log note_added activity (slack shortcut):', logError.message);
+                }
+            });
+
+            return;
+        }
+
+        if (payload.type === 'view_submission' && payload.view.callback_id === 'add_cancel_reason_modal') {
+            const pool = req.app.locals.pool;
+
+            let privateMetadata = {};
+            try {
+                privateMetadata = JSON.parse(payload.view.private_metadata || '{}') || {};
+            } catch {
+                privateMetadata = {};
+            }
+
+            const userId = payload.user?.id;
+            const userName = payload.user?.username || payload.user?.name || 'unknown';
+            const createdBy = `${userName} (<@${userId}>)`;
+
+            const reasonText = payload.view.state.values?.cancel_reason_block?.cancel_reason?.value?.trim() || '';
+            if (!reasonText) {
+                return res.json({
+                    response_action: 'errors',
+                    errors: {
+                        cancel_reason_block: 'Please enter a reason.'
+                    }
+                });
+            }
+
+            const memberEmail = (privateMetadata.memberEmail || '').toLowerCase();
+            const memberName = privateMetadata.memberName || null;
+            const channelId = privateMetadata.channelId || null;
+            const threadTs = privateMetadata.threadTs || null;
+            const memberThreadId = privateMetadata.memberThreadId || null;
+
+            if (!memberEmail) {
+                return res.json({
+                    response_action: 'errors',
+                    errors: {
+                        cancel_reason_block: 'Could not determine which member this cancellation is for.'
+                    }
+                });
+            }
+
+            let cancellationId = null;
+
+            try {
+                const existing = await pool.query(
+                    `
+                      SELECT id
+                      FROM cancellations
+                      WHERE member_email = $1 AND reason IS NULL
+                      ORDER BY created_at DESC
+                      LIMIT 1
+                    `,
+                    [memberEmail]
+                );
+
+                if (existing.rows[0]) {
+                    const updateResult = await pool.query(
+                        `
+                          UPDATE cancellations
+                          SET reason = $2,
+                              source = $3,
+                              created_by = $4
+                          WHERE id = $1
+                          RETURNING id
+                        `,
+                        [existing.rows[0].id, reasonText, 'slack_shortcut', createdBy]
+                    );
+                    cancellationId = updateResult.rows[0]?.id || existing.rows[0].id;
+                } else {
+                    const insertResult = await pool.query(
+                        `
+                          INSERT INTO cancellations (member_email, member_name, reason, source, created_by, slack_channel_id, slack_thread_ts, member_thread_id)
+                          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                          RETURNING id
+                        `,
+                        [memberEmail, memberName, reasonText, 'slack_shortcut', createdBy, channelId, threadTs, memberThreadId]
+                    );
+                    cancellationId = insertResult.rows[0]?.id || null;
+                }
+            } catch (dbErr) {
+                console.error('Error saving cancel reason:', dbErr.message);
+            }
+
+            res.status(200).send();
+
+            setImmediate(async () => {
+                try {
+                    if (channelId && threadTs) {
+                        const reasonBlock = slackBlocks.createCancellationReasonBlock(
+                            memberName || memberEmail,
+                            reasonText,
+                            createdBy
+                        );
+                        await postMessage(channelId, reasonBlock.text, reasonBlock.blocks, threadTs);
+                    }
+                } catch (slackError) {
+                    console.error('Failed to post cancellation reason to Slack thread:', slackError.message);
+                }
+
+                try {
+                    await pool.query(
+                        'INSERT INTO activity_log (action, entity_type, entity_id, details) VALUES ($1, $2, $3, $4)',
+                        ['cancellation_reason_added', 'cancellation', cancellationId, JSON.stringify({
+                            email: memberEmail,
+                            created_by: createdBy,
+                            source: 'slack_shortcut'
+                        })]
+                    );
+                } catch (logError) {
+                    console.error('Failed to log cancellation_reason_added:', logError.message);
                 }
             });
 
@@ -1197,9 +1438,80 @@ router.post('/events', verifySlackSignature, async (req, res) => {
                     typeformReferralSource: typeformData.referral_source || ''
                 };
             } else {
-                // Not a SamCart purchase thread we manage - ignore silently
-                console.log('[Slack Events] No matching SamCart order for this thread - skipping welcome edit handling');
-                return;
+                const threadRoot = historyData.messages?.[0] || null;
+                const fallbackEmail = extractEmailFromSlackMessage(threadRoot) || extractEmailFromSlackMessage(message);
+
+                if (!fallbackEmail) {
+                    console.log('[Slack Events] No matching SamCart order and no email found for this thread');
+                    await fetch('https://slack.com/api/chat.postMessage', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${SLACK_BOT_TOKEN}`
+                        },
+                        body: JSON.stringify({
+                            channel: channelId,
+                            thread_ts: threadTs,
+                            text: "I couldn't find a member email for this thread. Please make sure the thread includes the member's email."
+                        })
+                    });
+                    return;
+                }
+
+                console.log(`[Slack Events] No SamCart order for thread; falling back to email ${fallbackEmail}`);
+
+                const boResult = await pool.query(
+                    `
+                      SELECT first_name, last_name, business_name, bio, annual_revenue, team_count,
+                             traffic_sources, landing_pages, ai_skill_level, massive_win, pain_point
+                      FROM business_owners
+                      WHERE LOWER(email) = LOWER($1)
+                      LIMIT 1
+                    `,
+                    [fallbackEmail]
+                );
+                const bo = boResult.rows[0] || {};
+
+                const typeformResult = await pool.query(
+                    'SELECT * FROM typeform_applications WHERE LOWER(email) = LOWER($1) ORDER BY created_at DESC LIMIT 1',
+                    [fallbackEmail]
+                );
+                const typeformData = typeformResult.rows[0] || {};
+
+                const onboardingResult = await pool.query(`
+                    SELECT os.data FROM onboarding_submissions os
+                    JOIN business_owners bo ON os.business_owner_id = bo.id
+                    WHERE LOWER(bo.email) = LOWER($1)
+                    ORDER BY os.created_at DESC LIMIT 1
+                `, [fallbackEmail]);
+                const onboardingData = onboardingResult.rows[0]?.data || {};
+
+                memberData = {
+                    firstName: bo.first_name || typeformData.first_name || onboardingData.firstName || '',
+                    lastName: bo.last_name || typeformData.last_name || onboardingData.lastName || '',
+                    email: fallbackEmail,
+                    phone: typeformData.phone || onboardingData.phone || '',
+                    businessName: bo.business_name || onboardingData.businessName || '',
+                    businessOverview: bo.bio || onboardingData.bio || '',
+                    massiveWin: bo.massive_win || onboardingData.massiveWin || '',
+                    teamCount: bo.team_count || onboardingData.teamCount || '',
+                    trafficSources: bo.traffic_sources || onboardingData.trafficSources || '',
+                    landingPages: bo.landing_pages || onboardingData.landingPages || '',
+                    aiSkillLevel: bo.ai_skill_level || onboardingData.aiSkillLevel || '',
+                    bio: bo.bio || onboardingData.bio || '',
+                    // Typeform-specific fields
+                    typeformBusinessDescription: typeformData.business_description || '',
+                    typeformAnnualRevenue: typeformData.annual_revenue || bo.annual_revenue || '',
+                    typeformRevenueTrend: typeformData.revenue_trend || '',
+                    typeformMainChallenge: typeformData.main_challenge || '',
+                    typeformWhyCaPro: typeformData.why_ca_pro || '',
+                    typeformContactPreference: typeformData.contact_preference || '',
+                    typeformInvestmentReadiness: typeformData.investment_readiness || '',
+                    typeformDecisionTimeline: typeformData.decision_timeline || '',
+                    typeformHasTeam: typeformData.has_team || '',
+                    typeformAnythingElse: typeformData.anything_else || typeformData.additional_info || '',
+                    typeformReferralSource: typeformData.referral_source || ''
+                };
             }
 
             // Find the MOST RECENT welcome message from the bot (for iterative editing)

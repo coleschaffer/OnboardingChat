@@ -1,8 +1,20 @@
 const express = require('express');
 const router = express.Router();
-const { syncOnboardingToMonday, createBusinessOwnerItem, businessOwnerExistsInMonday, updateBusinessOwnerCompany } = require('./monday');
+const {
+  syncOnboardingToMonday,
+  createBusinessOwnerItem,
+  businessOwnerExistsInMonday,
+  updateBusinessOwnerCompany,
+  getColumnIds,
+  getBusinessOwnersByNextPaymentDueDate,
+  extractColumnText,
+  BOARDS
+} = require('./monday');
 const { gmailService } = require('../lib/gmail');
-const { postReplyNotification } = require('./slack-threads');
+const { postReplyNotification, postMessage } = require('./slack-threads');
+const { createMemberThread } = require('../lib/member-threads');
+const { parseMoney, formatCurrency, buildGrandfatheredLine } = require('../lib/billing-utils');
+const { DEFAULT_TIMEZONE, getDateKeyInTimeZone, addDaysToDateKey, getDatePartsInTimeZone } = require('../lib/time');
 
 // Helper to convert revenue to generalized format
 function generalizeRevenue(revenue) {
@@ -27,6 +39,208 @@ function generalizeRevenue(revenue) {
   }
 
   return revenue;
+}
+
+function buildYearlyTemplates(firstName, amount) {
+  const greetingName = firstName || 'there';
+  const grandfatheredLine = buildGrandfatheredLine(amount);
+
+  const emailLines = [
+    `Hey ${greetingName},`,
+    '',
+    'As always I hope you guys are doing well!',
+    '',
+    'I’m reaching out because it’s that time of year where you’re up for renewal in CA Pro.',
+    '',
+    'The current pricing for members is $50k PIF or $5,000 a month.'
+  ];
+
+  if (grandfatheredLine) {
+    emailLines[emailLines.length - 1] += ` ${grandfatheredLine}`;
+  }
+
+  emailLines.push(
+    '',
+    'I would of course love to have you guys in the mastermind for another year, so let me know!'
+  );
+
+  const whatsappLines = [
+    `Hey ${greetingName}, hope you're doing well! Reaching out because it's that time of year where you're up for renewal in CA Pro.`,
+    '',
+    'The current pricing for members is $50k PIF or $5,000 a month.'
+  ];
+
+  if (grandfatheredLine) {
+    whatsappLines[whatsappLines.length - 1] += ` ${grandfatheredLine}`;
+  }
+
+  whatsappLines.push(
+    '',
+    'I would of course love to have you guys in the mastermind for another year, so let me know!'
+  );
+
+  return {
+    subject: 'CA Pro Renewal',
+    emailBody: emailLines.join('\n'),
+    whatsappMessage: whatsappLines.join('\n')
+  };
+}
+
+async function runYearlyRenewals({ pool, force = false }) {
+  if (!process.env.MONDAY_API_TOKEN) {
+    return { success: true, skipped: true, reason: 'Monday not configured' };
+  }
+
+  const now = new Date();
+  const timeParts = getDatePartsInTimeZone(now, DEFAULT_TIMEZONE);
+  const currentHour = parseInt(timeParts.hour || '0', 10);
+  if (!force && currentHour !== 9) {
+    return { success: true, skipped: true, reason: 'Outside 9am ET window' };
+  }
+
+  const todayKey = getDateKeyInTimeZone(now, DEFAULT_TIMEZONE);
+  const dueDateKey = addDaysToDateKey(todayKey, 7);
+
+  if (!dueDateKey) {
+    return { success: false, error: 'Failed to compute due date' };
+  }
+
+  const columns = await getColumnIds(BOARDS.PRO_BUSINESS_OWNERS);
+  const emailColId = columns['Email']?.id || null;
+
+  if (!emailColId) {
+    return { success: false, error: 'Email column not found on Monday board' };
+  }
+
+  const items = await getBusinessOwnersByNextPaymentDueDate(dueDateKey);
+
+  const results = {
+    processed: 0,
+    notified: 0,
+    skipped: 0,
+    errors: []
+  };
+
+  for (const item of items) {
+    results.processed += 1;
+
+    try {
+      const email = extractColumnText(item, emailColId) || null;
+      if (!email) {
+        results.skipped += 1;
+        continue;
+      }
+
+      const amountText = extractColumnText(item, 'numbers');
+      const mrrText = extractColumnText(item, 'numbers3');
+      const mrrAmount = parseMoney(mrrText);
+
+      if (mrrAmount && mrrAmount > 0) {
+        results.skipped += 1;
+        continue;
+      }
+
+      const amount = parseMoney(amountText);
+      const memberName = item.name || email;
+      const firstName = (memberName || '').split(' ')[0] || '';
+
+      const dueDateDisplay = new Date(`${dueDateKey}T00:00:00Z`).toLocaleDateString('en-US', {
+        timeZone: DEFAULT_TIMEZONE,
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric'
+      });
+
+      const summaryText = `📅 Yearly Renewal Notice (7 days out)\n*Name:* ${memberName}\n*Email:* ${email}\n*Due Date:* ${dueDateDisplay}\n*Amount:* ${amount ? formatCurrency(amount) : 'N/A'}`;
+      const summaryBlocks = [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: summaryText
+          }
+        }
+      ];
+
+      const threadResult = await createMemberThread(pool, {
+        email,
+        name: memberName,
+        threadType: 'yearly_renewal',
+        periodKey: dueDateKey,
+        channelId: process.env.CA_PRO_NOTIFICATIONS_SLACK_CHANNEL,
+        summaryText,
+        summaryBlocks,
+        metadata: {
+          due_date: dueDateKey,
+          amount: amount || null
+        }
+      });
+
+      const thread = threadResult?.thread;
+      if (!thread?.slack_thread_ts || !thread?.slack_channel_id) {
+        results.errors.push({ email, error: 'Failed to create Slack thread' });
+        continue;
+      }
+
+      if (!threadResult.created) {
+        results.skipped += 1;
+        continue;
+      }
+
+      const templates = buildYearlyTemplates(firstName, amount);
+      const slackBlocks = require('../lib/slack-blocks');
+
+      const whatsappBlock = slackBlocks.createWhatsAppCopyBlock(templates.whatsappMessage);
+      await postMessage(thread.slack_channel_id, whatsappBlock.text, whatsappBlock.blocks, thread.slack_thread_ts);
+
+      let emailSent = false;
+      let emailError = null;
+
+      if (!process.env.STEF_GOOGLE_CLIENT_ID || !process.env.STEF_GOOGLE_REFRESH_TOKEN) {
+        emailError = 'Gmail not configured';
+      } else {
+        try {
+          const emailResult = await gmailService.sendEmail(email, templates.subject, templates.emailBody);
+          emailSent = true;
+
+          await pool.query(`
+            INSERT INTO email_threads (
+              gmail_thread_id, gmail_message_id, recipient_email, recipient_first_name,
+              subject, initial_email_sent_at, status, context_type, context_id,
+              slack_channel_id, slack_thread_ts, recipient_name
+            ) VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, 'sent', $6, $7, $8, $9, $10)
+          `, [
+            emailResult.threadId,
+            emailResult.messageId,
+            email,
+            firstName,
+            templates.subject,
+            'yearly_renewal',
+            thread.id,
+            thread.slack_channel_id,
+            thread.slack_thread_ts,
+            memberName
+          ]);
+        } catch (err) {
+          emailError = err.message;
+        }
+      }
+
+      if (emailSent) {
+        const emailBlock = slackBlocks.createEmailSentBlock(email, templates.subject, templates.emailBody);
+        await postMessage(thread.slack_channel_id, emailBlock.text, emailBlock.blocks, thread.slack_thread_ts);
+      } else {
+        const errorBlock = slackBlocks.createEmailFailedBlock(email, emailError || 'Email failed');
+        await postMessage(thread.slack_channel_id, errorBlock.text, errorBlock.blocks, thread.slack_thread_ts);
+      }
+
+      results.notified += 1;
+    } catch (error) {
+      results.errors.push({ item_id: item.id, error: error.message });
+    }
+  }
+
+  return { success: true, ...results, due_date: dueDateKey };
 }
 
 // Generate welcome message using Claude
@@ -521,6 +735,44 @@ router.post('/process-monday-syncs', async (req, res) => {
   }
 });
 
+// Process yearly renewal notices (7 days before Next Payment Due Date)
+router.post('/process-yearly-renewals', async (req, res) => {
+  try {
+    const secretKey = req.headers['x-cron-secret'] || req.body.secret;
+    const expectedSecret = process.env.CRON_SECRET;
+
+    if (!expectedSecret) {
+      console.error('CRON_SECRET not configured');
+      return res.status(500).json({ error: 'Server not configured for cron jobs' });
+    }
+
+    if (secretKey !== expectedSecret) {
+      console.error('Invalid cron secret provided');
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const pool = req.app.locals.pool;
+    const force = req.query.force === 'true' || req.body?.force === true;
+    const result = await runYearlyRenewals({ pool, force });
+    res.json(result);
+  } catch (error) {
+    console.error('Error processing yearly renewals:', error);
+    res.status(500).json({ error: 'Failed to process yearly renewals' });
+  }
+});
+
+// Force-run yearly renewal notices (admin testing)
+router.post('/process-yearly-renewals/force', async (req, res) => {
+  try {
+    const pool = req.app.locals.pool;
+    const result = await runYearlyRenewals({ pool, force: true });
+    res.json(result);
+  } catch (error) {
+    console.error('Error force-running yearly renewals:', error);
+    res.status(500).json({ error: 'Failed to run yearly renewals' });
+  }
+});
+
 // Health check for cron job monitoring
 router.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -625,9 +877,12 @@ router.post('/process-email-replies', async (req, res) => {
           })]);
 
           // Post notification to Slack thread
-          if (thread.typeform_application_id) {
-            try {
-              const recipientName = `${thread.first_name || ''} ${thread.last_name || ''}`.trim() || thread.recipient_email;
+          try {
+            const recipientName = thread.recipient_name ||
+              `${thread.first_name || ''} ${thread.last_name || ''}`.trim() ||
+              thread.recipient_email;
+
+            if (thread.typeform_application_id) {
               await postReplyNotification(
                 pool,
                 thread.typeform_application_id,
@@ -637,10 +892,24 @@ router.post('/process-email-replies', async (req, res) => {
                 replyCheck.latestReply?.body,
                 thread.gmail_thread_id
               );
-              console.log(`Posted reply notification to Slack for ${thread.recipient_email}`);
-            } catch (slackError) {
-              console.error('Failed to post Slack notification:', slackError.message);
+            } else if (thread.slack_channel_id && thread.slack_thread_ts) {
+              const { postReplyNotificationToThread } = require('./slack-threads');
+              await postReplyNotificationToThread({
+                channelId: thread.slack_channel_id,
+                threadTs: thread.slack_thread_ts,
+                recipientName,
+                recipientEmail: thread.recipient_email,
+                replySnippet: replyCheck.latestReply?.snippet,
+                replyBody: replyCheck.latestReply?.body,
+                threadId: thread.gmail_thread_id,
+                contextType: thread.context_type || 'yearly_renewal',
+                contextId: thread.context_id
+              });
             }
+
+            console.log(`Posted reply notification to Slack for ${thread.recipient_email}`);
+          } catch (slackError) {
+            console.error('Failed to post Slack notification:', slackError.message);
           }
         }
       } catch (error) {

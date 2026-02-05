@@ -58,6 +58,7 @@ app.use('/api', require('./api/validate'));
 app.use('/api/slack', require('./api/slack'));
 app.use('/api/jobs', require('./api/jobs'));
 app.use('/api/notes', require('./api/notes'));
+app.use('/api/cancellations', require('./api/cancellations'));
 
 // Serve admin dashboard
 app.use('/admin', express.static(path.join(__dirname, 'admin')));
@@ -251,6 +252,120 @@ async function runMigrations() {
       )
     `);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_pending_email_sends_status ON pending_email_sends(status)`);
+
+    // Member threads table (Slack threads for renewals/offboarding)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS member_threads (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        member_email VARCHAR(255),
+        member_name VARCHAR(255),
+        thread_type VARCHAR(50) NOT NULL,
+        period_key VARCHAR(20) NOT NULL,
+        slack_channel_id VARCHAR(50),
+        slack_thread_ts VARCHAR(50),
+        metadata JSONB,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_member_threads_unique
+      ON member_threads(member_email, thread_type, period_key)
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_member_threads_email ON member_threads(LOWER(member_email))`);
+
+    // SamCart subscription events (for retries/offboarding)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS samcart_subscription_events (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        event_key VARCHAR(255) UNIQUE,
+        event_type VARCHAR(100),
+        email VARCHAR(255),
+        period_key VARCHAR(20),
+        subscription_id VARCHAR(255),
+        order_id VARCHAR(255),
+        amount DECIMAL(10, 2),
+        currency VARCHAR(10) DEFAULT 'USD',
+        status VARCHAR(50),
+        occurred_at TIMESTAMP WITH TIME ZONE,
+        raw_data JSONB,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_samcart_subscription_events_email ON samcart_subscription_events(LOWER(email))`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_samcart_subscription_events_type ON samcart_subscription_events(event_type)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_samcart_subscription_events_period ON samcart_subscription_events(period_key)`);
+
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'samcart_subscription_events' AND column_name = 'period_key') THEN
+          ALTER TABLE samcart_subscription_events ADD COLUMN period_key VARCHAR(20);
+        END IF;
+      END $$;
+    `);
+
+    // Cancellations table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS cancellations (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        member_email VARCHAR(255),
+        member_name VARCHAR(255),
+        reason TEXT,
+        source VARCHAR(100),
+        created_by VARCHAR(255),
+        slack_channel_id VARCHAR(50),
+        slack_thread_ts VARCHAR(50),
+        member_thread_id UUID REFERENCES member_threads(id) ON DELETE SET NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_cancellations_email ON cancellations(LOWER(member_email))`);
+
+    // Extend email_threads / pending_email_sends with context + slack thread
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'email_threads' AND column_name = 'context_type') THEN
+          ALTER TABLE email_threads ADD COLUMN context_type VARCHAR(50);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'email_threads' AND column_name = 'context_id') THEN
+          ALTER TABLE email_threads ADD COLUMN context_id UUID;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'email_threads' AND column_name = 'slack_channel_id') THEN
+          ALTER TABLE email_threads ADD COLUMN slack_channel_id VARCHAR(50);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'email_threads' AND column_name = 'slack_thread_ts') THEN
+          ALTER TABLE email_threads ADD COLUMN slack_thread_ts VARCHAR(50);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'email_threads' AND column_name = 'recipient_name') THEN
+          ALTER TABLE email_threads ADD COLUMN recipient_name VARCHAR(255);
+        END IF;
+      END $$;
+    `);
+
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'pending_email_sends' AND column_name = 'context_type') THEN
+          ALTER TABLE pending_email_sends ADD COLUMN context_type VARCHAR(50);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'pending_email_sends' AND column_name = 'context_id') THEN
+          ALTER TABLE pending_email_sends ADD COLUMN context_id UUID;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'pending_email_sends' AND column_name = 'sending_message_ts') THEN
+          ALTER TABLE pending_email_sends ADD COLUMN sending_message_ts VARCHAR(50);
+        END IF;
+      END $$;
+    `);
 
     // Application notes table
     await pool.query(`

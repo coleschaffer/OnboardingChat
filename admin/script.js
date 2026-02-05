@@ -8,6 +8,7 @@ let currentTab = 'overview';
 let applicationsPage = 0;
 let membersPage = 0;
 let teamMembersPage = 0;
+let cancellationsPage = 0;
 const pageSize = 20;
 
 // Monday-style board state (applications)
@@ -154,6 +155,9 @@ function switchTab(tab) {
         case 'team-members':
             loadTeamMembers();
             break;
+        case 'cancellations':
+            loadCancellations();
+            break;
         case 'onboarding':
             loadOnboarding();
             break;
@@ -168,11 +172,12 @@ function setupSearch() {
     const applicationsSearch = document.getElementById('applications-search');
     const membersSearch = document.getElementById('members-search');
     const teamMembersSearch = document.getElementById('team-members-search');
+    const cancellationsSearch = document.getElementById('cancellations-search');
     const submissionsSearch = document.getElementById('submissions-search');
 
     let searchTimeout;
 
-    [applicationsSearch, membersSearch, teamMembersSearch, submissionsSearch].forEach(input => {
+    [applicationsSearch, membersSearch, teamMembersSearch, cancellationsSearch, submissionsSearch].forEach(input => {
         if (input) {
             input.addEventListener('input', () => {
                 clearTimeout(searchTimeout);
@@ -186,6 +191,9 @@ function setupSearch() {
                     } else if (input === teamMembersSearch) {
                         teamMembersPage = 0;
                         loadTeamMembers();
+                    } else if (input === cancellationsSearch) {
+                        cancellationsPage = 0;
+                        loadCancellations();
                     } else if (input === submissionsSearch) {
                         loadOnboarding();
                     }
@@ -887,6 +895,9 @@ async function viewApplication(id, options = {}) {
             ],
             footer: `
                 <button class="btn btn-secondary btn-sm" type="button" onclick="convertApplication('${id}')">Convert to Member</button>
+                <button class="btn btn-secondary btn-sm" type="button" onclick="simulateSubscriptionFailures('${id}')">Simulate Charge Failed</button>
+                <button class="btn btn-secondary btn-sm" type="button" onclick="simulateSubscriptionCancel('${id}')">Simulate Subscription Canceled</button>
+                <button class="btn btn-secondary btn-sm" type="button" onclick="runYearlyRenewalsForce()">Run Yearly Renewals (Force)</button>
             `
         });
     } catch (error) {
@@ -930,6 +941,47 @@ async function convertApplication(id) {
         loadOverview();
     } catch (error) {
         showToast(error.message || 'Failed to convert application', 'error');
+    }
+}
+
+async function simulateSubscriptionFailures(applicationId) {
+    const input = prompt('How many failed charges to simulate? (1-4)', '1');
+    if (input === null) return;
+
+    const count = Math.max(1, Math.min(parseInt(input, 10) || 1, 4));
+
+    try {
+        await fetchAPI(`/applications/${applicationId}/test-subscription-failure`, {
+            method: 'POST',
+            body: JSON.stringify({ count })
+        });
+        showToast(`Simulated ${count} failed charge${count === 1 ? '' : 's'}`, 'success');
+    } catch (error) {
+        showToast(error.message || 'Failed to simulate charge failures', 'error');
+    }
+}
+
+async function simulateSubscriptionCancel(applicationId) {
+    const confirmed = confirm('Simulate a Subscription Canceled event for this member?');
+    if (!confirmed) return;
+
+    try {
+        await fetchAPI(`/applications/${applicationId}/test-subscription-cancel`, { method: 'POST' });
+        showToast('Simulated subscription canceled event', 'success');
+    } catch (error) {
+        showToast(error.message || 'Failed to simulate subscription cancel', 'error');
+    }
+}
+
+async function runYearlyRenewalsForce() {
+    const confirmed = confirm('Run yearly renewal notices now (force, outside 9am ET)?');
+    if (!confirmed) return;
+
+    try {
+        await fetchAPI('/jobs/process-yearly-renewals/force', { method: 'POST' });
+        showToast('Yearly renewal job started', 'success');
+    } catch (error) {
+        showToast(error.message || 'Failed to run yearly renewals', 'error');
     }
 }
 
@@ -1561,6 +1613,50 @@ async function loadTeamMembers() {
     }
 }
 
+// Cancellations
+async function loadCancellations() {
+    const tbody = document.getElementById('cancellations-tbody');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="5" class="loading">Loading...</td></tr>';
+
+    try {
+        const search = document.getElementById('cancellations-search')?.value || '';
+
+        const params = new URLSearchParams({
+            limit: pageSize,
+            offset: cancellationsPage * pageSize
+        });
+        if (search) params.append('search', search);
+
+        const data = await fetchAPI(`/cancellations?${params}`);
+        renderCancellationsTable(data.cancellations || []);
+        renderPagination('cancellations', data.total || 0, cancellationsPage);
+    } catch (error) {
+        console.error('Error loading cancellations:', error);
+        tbody.innerHTML = '<tr><td colspan="5" class="loading">Error loading cancellations</td></tr>';
+    }
+}
+
+function renderCancellationsTable(rows) {
+    const tbody = document.getElementById('cancellations-tbody');
+    if (!tbody) return;
+
+    if (!rows || rows.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" class="loading">No cancellations found</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = rows.map(item => `
+        <tr>
+            <td>${escapeHtml(item.member_name || '-')}</td>
+            <td>${escapeHtml(item.member_email || '-')}</td>
+            <td>${escapeHtml(item.reason || '-')}</td>
+            <td>${escapeHtml(item.source || '-')}</td>
+            <td>${formatDate(item.created_at)}</td>
+        </tr>
+    `).join('');
+}
+
 async function viewTeamMember(id) {
     try {
         const tm = await fetchAPI(`/team-members/${id}`);
@@ -1977,6 +2073,10 @@ function changePage(type, page) {
         case 'team-members':
             teamMembersPage = page;
             loadTeamMembers();
+            break;
+        case 'cancellations':
+            cancellationsPage = page;
+            loadCancellations();
             break;
     }
 }

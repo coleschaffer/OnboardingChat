@@ -1,5 +1,36 @@
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
+
+function getSelfBaseUrl() {
+  if (process.env.BASE_URL) return process.env.BASE_URL.replace(/\/$/, '');
+  const port = process.env.PORT || 3000;
+  return `http://localhost:${port}`;
+}
+
+async function postSamcartTestWebhook(payload) {
+  const baseUrl = getSelfBaseUrl();
+  const response = await fetch(`${baseUrl}/api/webhooks/samcart`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+
+  let data = {};
+  try {
+    data = await response.json();
+  } catch {
+    data = {};
+  }
+
+  if (!response.ok) {
+    const error = new Error(data.error || 'Samcart webhook request failed');
+    error.status = response.status;
+    throw error;
+  }
+
+  return data;
+}
 
 // Get all applications with optional filters
 router.get('/', async (req, res) => {
@@ -239,6 +270,125 @@ router.post('/:id/convert', async (req, res) => {
   } catch (error) {
     console.error('Error converting application:', error);
     res.status(500).json({ error: 'Failed to convert application' });
+  }
+});
+
+// Test helper: simulate SamCart subscription charge failures for this application
+router.post('/:id/test-subscription-failure', async (req, res) => {
+  try {
+    const pool = req.app.locals.pool;
+    const { id } = req.params;
+    const requestedCount = parseInt(req.body?.count, 10);
+    const count = Number.isFinite(requestedCount) ? Math.max(1, Math.min(requestedCount, 4)) : 1;
+
+    const appResult = await pool.query(
+      'SELECT id, email, first_name, last_name, phone FROM typeform_applications WHERE id = $1',
+      [id]
+    );
+    if (appResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Application not found' });
+    }
+
+    const app = appResult.rows[0];
+    if (!app.email) {
+      return res.status(400).json({ error: 'Application missing email' });
+    }
+
+    const orderResult = await pool.query(
+      `
+        SELECT samcart_order_id, subscription_id, order_total, currency
+        FROM samcart_orders
+        WHERE LOWER(email) = LOWER($1)
+        ORDER BY created_at DESC
+        LIMIT 1
+      `,
+      [app.email]
+    );
+    const order = orderResult.rows[0] || {};
+
+    const results = [];
+    for (let i = 0; i < count; i += 1) {
+      const payload = {
+        type: 'Subscription Charge Failed',
+        event_id: `test-${crypto.randomUUID()}`,
+        event_timestamp: new Date().toISOString(),
+        customer: {
+          email: app.email,
+          first_name: app.first_name,
+          last_name: app.last_name,
+          phone: app.phone
+        },
+        subscription_id: order.subscription_id || `test-subscription-${app.id}`,
+        order_id: order.samcart_order_id || `test-order-${app.id}`,
+        amount: order.order_total || 5000,
+        currency: order.currency || 'USD',
+        status: 'failed'
+      };
+
+      const data = await postSamcartTestWebhook(payload);
+      results.push(data);
+    }
+
+    res.json({ success: true, requested: count, results });
+  } catch (error) {
+    console.error('Error simulating subscription failure:', error);
+    res.status(500).json({ error: error.message || 'Failed to simulate subscription failure' });
+  }
+});
+
+// Test helper: simulate SamCart subscription canceled for this application
+router.post('/:id/test-subscription-cancel', async (req, res) => {
+  try {
+    const pool = req.app.locals.pool;
+    const { id } = req.params;
+
+    const appResult = await pool.query(
+      'SELECT id, email, first_name, last_name, phone FROM typeform_applications WHERE id = $1',
+      [id]
+    );
+    if (appResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Application not found' });
+    }
+
+    const app = appResult.rows[0];
+    if (!app.email) {
+      return res.status(400).json({ error: 'Application missing email' });
+    }
+
+    const orderResult = await pool.query(
+      `
+        SELECT samcart_order_id, subscription_id, order_total, currency
+        FROM samcart_orders
+        WHERE LOWER(email) = LOWER($1)
+        ORDER BY created_at DESC
+        LIMIT 1
+      `,
+      [app.email]
+    );
+    const order = orderResult.rows[0] || {};
+
+    const payload = {
+      type: 'Subscription Canceled',
+      event_id: `test-${crypto.randomUUID()}`,
+      event_timestamp: new Date().toISOString(),
+      customer: {
+        email: app.email,
+        first_name: app.first_name,
+        last_name: app.last_name,
+        phone: app.phone
+      },
+      subscription_id: order.subscription_id || `test-subscription-${app.id}`,
+      order_id: order.samcart_order_id || `test-order-${app.id}`,
+      amount: order.order_total || 5000,
+      currency: order.currency || 'USD',
+      status: 'canceled'
+    };
+
+    const data = await postSamcartTestWebhook(payload);
+    res.json({ success: true, result: data });
+  } catch (error) {
+    console.error('Error simulating subscription cancel:', error);
+    res.status(500).json({ error: error.message || 'Failed to simulate subscription cancel' });
   }
 });
 

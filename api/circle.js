@@ -436,10 +436,104 @@ async function syncAllToCircle(teamMembers, partners, pool = null) {
   return combined;
 }
 
+/**
+ * Remove a member from a Circle access group
+ */
+async function removeMemberFromAccessGroup({ community, email, accessGroupId }) {
+  const config = CIRCLE_CONFIG[community];
+  if (!config) {
+    return { success: false, community, email, accessGroupId, error: `Unknown Circle community: ${community}` };
+  }
+
+  const token = getCircleToken(community);
+  if (!token) {
+    return { success: false, community, email, accessGroupId, error: `No API token configured for ${community}` };
+  }
+
+  if (!email) {
+    return { success: false, community, email, accessGroupId, error: 'Missing email' };
+  }
+
+  try {
+    const response = await fetch(`${config.baseUrl}/access_groups/${accessGroupId}/community_members`, {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Token ${token}`
+      },
+      body: JSON.stringify({ email })
+    });
+
+    if (response.ok) {
+      return { success: true, community, email, accessGroupId };
+    }
+
+    const data = await response.json().catch(() => ({}));
+    const errorMessage = data.message || data.error || JSON.stringify(data);
+
+    return { success: false, community, email, accessGroupId, error: errorMessage };
+  } catch (error) {
+    return { success: false, community, email, accessGroupId, error: error.message };
+  }
+}
+
+/**
+ * Remove members from Circle communities (CA + SPG)
+ */
+async function removeMembersFromCircle(teamMembers = [], partners = []) {
+  const results = {
+    removed: 0,
+    errors: []
+  };
+
+  const removeTasks = [];
+
+  for (const member of teamMembers) {
+    if (!member.email) continue;
+    removeTasks.push(removeMemberFromAccessGroup({
+      community: 'CA',
+      email: member.email,
+      accessGroupId: CIRCLE_CONFIG.CA.accessGroups.teamMembers
+    }));
+    removeTasks.push(removeMemberFromAccessGroup({
+      community: 'SPG',
+      email: member.email,
+      accessGroupId: CIRCLE_CONFIG.SPG.accessGroups.teamMembers
+    }));
+  }
+
+  for (const partner of partners) {
+    if (!partner.email) continue;
+    removeTasks.push(removeMemberFromAccessGroup({
+      community: 'CA',
+      email: partner.email,
+      accessGroupId: CIRCLE_CONFIG.CA.accessGroups.partners
+    }));
+    removeTasks.push(removeMemberFromAccessGroup({
+      community: 'SPG',
+      email: partner.email,
+      accessGroupId: CIRCLE_CONFIG.SPG.accessGroups.partners
+    }));
+  }
+
+  const responses = await Promise.all(removeTasks);
+  for (const response of responses) {
+    if (response.success) {
+      results.removed += 1;
+    } else {
+      results.errors.push(response);
+    }
+  }
+
+  return results;
+}
+
 module.exports = {
   addMemberToCircle,
   syncTeamMembersToCircle,
   syncPartnersToCircle,
   syncAllToCircle,
+  removeMemberFromAccessGroup,
+  removeMembersFromCircle,
   CIRCLE_CONFIG
 };

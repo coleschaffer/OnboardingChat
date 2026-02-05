@@ -3,8 +3,16 @@ const router = express.Router();
 const crypto = require('crypto');
 const { gmailService } = require('../lib/gmail');
 const { postApplicationNotification, createApplicationThread, postMessage } = require('./slack-threads');
-const { createBusinessOwnerItem, businessOwnerExistsInMonday } = require('./monday');
+const { createBusinessOwnerItem, businessOwnerExistsInMonday, findBusinessOwnerByEmail, getColumnIds, updateBusinessOwnerStatusByEmail, updateTeamMemberStatusByEmail } = require('./monday');
 const { sendWelcomeThread } = require('./jobs');
+const { createWhatsAppCopyBlock } = require('../lib/slack-blocks');
+const { createMemberThread, getMemberThread, updateMemberThreadMetadata } = require('../lib/member-threads');
+const { parseMoney, formatCurrency, formatFullName } = require('../lib/billing-utils');
+const { DEFAULT_TIMEZONE, getMonthKeyInTimeZone, getDateKeyInTimeZone } = require('../lib/time');
+const { removeGroupParticipants, normalizePhoneForWasender } = require('../lib/wasender-client');
+const { addContactsToGroups, buildWhatsAppAddSummary } = require('../lib/whatsapp-actions');
+const { resolveGroupKeysForRole } = require('../lib/whatsapp-groups');
+const { removeMembersFromCircle } = require('./circle');
 
 // Typeform webhook handler
 router.post('/typeform', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -392,6 +400,478 @@ async function postSamCartNotification(pool, orderId, orderData) {
   }
 }
 
+async function postYearlyPurchaseToRenewalThread(pool, orderData) {
+  const productId = orderData.product_id ? orderData.product_id.toString() : '';
+  const productName = (orderData.product_name || '').toLowerCase();
+  const isYearly = productId === '1062289' || productName.includes('yearly');
+
+  if (!isYearly || !orderData.email) {
+    return false;
+  }
+
+  const result = await pool.query(
+    `
+      SELECT slack_channel_id, slack_thread_ts
+      FROM member_threads
+      WHERE member_email = $1
+        AND thread_type = 'yearly_renewal'
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    [orderData.email.toLowerCase()]
+  );
+
+  const thread = result.rows[0];
+  if (!thread?.slack_channel_id || !thread?.slack_thread_ts) {
+    return false;
+  }
+
+  const amountLabel = orderData.order_total ? formatCurrency(orderData.order_total) : 'N/A';
+  const message = `✅ Yearly renewal purchase completed\n*Order ID:* ${orderData.samcart_order_id || 'N/A'}\n*Amount:* ${amountLabel}`;
+
+  await postMessage(thread.slack_channel_id, message, [
+    { type: 'section', text: { type: 'mrkdwn', text: message } }
+  ], thread.slack_thread_ts);
+
+  return true;
+}
+
+function normalizeSamcartEventType(rawType) {
+  return (rawType || '').toString().trim().toLowerCase().replace(/[_\.]+/g, ' ');
+}
+
+function mapSubscriptionEventType(rawType) {
+  const normalized = normalizeSamcartEventType(rawType);
+  if (!normalized.includes('subscription')) return null;
+
+  if (normalized.includes('charge failed')) return 'charge_failed';
+  if (normalized.includes('charged')) return 'charged';
+  if (normalized.includes('recovered')) return 'recovered';
+  if (normalized.includes('delinquent')) return 'delinquent';
+  if (normalized.includes('canceled') || normalized.includes('cancelled')) return 'canceled';
+  if (normalized.includes('completed')) return 'completed';
+
+  return 'subscription_event';
+}
+
+function extractSamcartEmail(payload) {
+  const customer = payload.customer || payload.customer_details || payload.subscription?.customer || payload.subscription?.customer_details || {};
+  return customer.email ||
+    payload.customer_email ||
+    payload.email ||
+    payload.subscription?.email ||
+    payload.order?.customer_email ||
+    payload.order?.email ||
+    null;
+}
+
+function extractSamcartPhone(payload) {
+  const customer = payload.customer || payload.customer_details || payload.subscription?.customer || payload.subscription?.customer_details || {};
+  return customer.phone ||
+    payload.customer_phone ||
+    payload.phone ||
+    payload.subscription?.phone ||
+    payload.order?.customer_phone ||
+    payload.order?.phone ||
+    null;
+}
+
+function extractSamcartAmount(payload) {
+  const candidates = [
+    payload.charge?.amount,
+    payload.subscription?.amount,
+    payload.order?.total,
+    payload.order?.order_total,
+    payload.order_total,
+    payload.amount,
+    payload.total
+  ];
+
+  for (const value of candidates) {
+    const parsed = parseMoney(value);
+    if (parsed != null) return parsed;
+  }
+
+  return null;
+}
+
+function extractSamcartSubscriptionId(payload) {
+  return payload.subscription?.id || payload.subscription_id || payload.data?.subscription_id || null;
+}
+
+function extractSamcartOrderId(payload) {
+  return payload.order?.id || payload.order_id || payload.order?.order_id || null;
+}
+
+function extractSamcartEventTimestamp(payload) {
+  const candidates = [
+    payload.event_time,
+    payload.event_timestamp,
+    payload.timestamp,
+    payload.created_at,
+    payload.event?.created_at
+  ];
+
+  for (const value of candidates) {
+    const date = new Date(value);
+    if (!Number.isNaN(date.getTime())) return date;
+  }
+
+  return new Date();
+}
+
+function buildSamcartEventKey(payload, rawType) {
+  const candidate =
+    payload.id ||
+    payload.event_id ||
+    payload.webhook_id ||
+    payload.event?.id ||
+    payload.event?.uuid ||
+    payload.subscription?.id ||
+    payload.subscription_id ||
+    payload.order?.id ||
+    payload.order_id;
+
+  const hash = crypto
+    .createHash('sha256')
+    .update(JSON.stringify(payload || {}))
+    .digest('hex');
+
+  if (candidate) {
+    return `${normalizeSamcartEventType(rawType) || 'event'}:${candidate}:${hash}`;
+  }
+
+  return `${normalizeSamcartEventType(rawType) || 'event'}:${hash}`;
+}
+
+async function recordSubscriptionEvent(pool, {
+  eventKey,
+  eventType,
+  email,
+  subscriptionId,
+  orderId,
+  amount,
+  currency,
+  status,
+  occurredAt,
+  periodKey,
+  rawData
+}) {
+  const result = await pool.query(`
+    INSERT INTO samcart_subscription_events (
+      event_key, event_type, email, period_key,
+      subscription_id, order_id, amount, currency,
+      status, occurred_at, raw_data
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    ON CONFLICT (event_key) DO NOTHING
+    RETURNING id
+  `, [
+    eventKey,
+    eventType,
+    email,
+    periodKey,
+    subscriptionId,
+    orderId,
+    amount,
+    currency || 'USD',
+    status || null,
+    occurredAt,
+    JSON.stringify(rawData || {})
+  ]);
+
+  return result.rows[0]?.id || null;
+}
+
+async function countSubscriptionFailures(pool, email, periodKey, since = null) {
+  const params = [email, periodKey];
+  let query = `
+      SELECT COUNT(*)::int AS count
+      FROM samcart_subscription_events
+      WHERE LOWER(email) = LOWER($1)
+        AND event_type = 'charge_failed'
+        AND period_key = $2
+  `;
+
+  if (since) {
+    query += ` AND occurred_at >= $3`;
+    params.push(since);
+  }
+
+  const result = await pool.query(query, params);
+  return result.rows[0]?.count || 0;
+}
+
+function buildMonthlyBounceTemplate(firstName) {
+  const greetingName = firstName || 'there';
+  return `Hey ${greetingName}, hope you're doing well! Just wanted to give you a heads up - your most recent CA Pro payment didn't go through.\n\nIt'll automatically retry in a few days, so if your card is good you can ignore this. Otherwise, I can send you a link to update your payment info. Let me know if you need any help!`;
+}
+
+async function extractPhoneFromMondayItem(mondayItem) {
+  if (!mondayItem) return null;
+
+  try {
+    const columns = await getColumnIds('6400461985');
+    const phoneColumnIds = Object.entries(columns)
+      .filter(([title]) => {
+        const lower = title.toLowerCase();
+        return lower.includes('phone') || lower.includes('whatsapp');
+      })
+      .map(([, col]) => col.id);
+
+    const phoneColumn = mondayItem.column_values?.find(col => phoneColumnIds.includes(col.id) && col.text);
+    return phoneColumn?.text || null;
+  } catch (error) {
+    console.error('[WhatsApp Add] Monday phone lookup failed:', error.message);
+    return null;
+  }
+}
+
+async function resolveBusinessOwnerForWhatsAppAdd(pool, email, orderData = {}) {
+  const normalizedEmail = (email || '').toLowerCase();
+  let firstName = orderData.first_name || null;
+  let lastName = orderData.last_name || null;
+  let phone = orderData.phone || null;
+
+  if (normalizedEmail) {
+    try {
+      const tfResult = await pool.query(
+        'SELECT first_name, last_name, phone FROM typeform_applications WHERE LOWER(email) = LOWER($1) ORDER BY created_at DESC LIMIT 1',
+        [normalizedEmail]
+      );
+      if (tfResult.rows[0]) {
+        firstName = firstName || tfResult.rows[0].first_name;
+        lastName = lastName || tfResult.rows[0].last_name;
+        phone = phone || tfResult.rows[0].phone;
+      }
+    } catch (error) {
+      console.error('[WhatsApp Add] Typeform lookup failed:', error.message);
+    }
+
+    try {
+      const mondayItem = await findBusinessOwnerByEmail(normalizedEmail);
+      if (mondayItem) {
+        const mondayPhone = await extractPhoneFromMondayItem(mondayItem);
+        phone = phone || mondayPhone;
+        if ((!firstName || !lastName) && mondayItem.name) {
+          const parts = mondayItem.name.split(' ').filter(Boolean);
+          firstName = firstName || parts[0] || null;
+          lastName = lastName || parts.slice(1).join(' ') || null;
+        }
+      }
+    } catch (error) {
+      console.error('[WhatsApp Add] Monday lookup failed:', error.message);
+    }
+
+    try {
+      const boResult = await pool.query(
+        'SELECT first_name, last_name, phone, whatsapp_number FROM business_owners WHERE LOWER(email) = LOWER($1) LIMIT 1',
+        [normalizedEmail]
+      );
+      if (boResult.rows[0]) {
+        firstName = firstName || boResult.rows[0].first_name;
+        lastName = lastName || boResult.rows[0].last_name;
+        phone = phone || boResult.rows[0].whatsapp_number || boResult.rows[0].phone;
+      }
+    } catch (error) {
+      console.error('[WhatsApp Add] Business owner lookup failed:', error.message);
+    }
+  }
+
+  const name = formatFullName(firstName, lastName) || normalizedEmail || 'Member';
+  return { name, email: normalizedEmail, phone };
+}
+
+async function resolveMemberContext(pool, email, phone) {
+  const normalizedEmail = (email || '').toLowerCase();
+
+  let firstName = null;
+  let lastName = null;
+  let displayName = null;
+  let phoneNumber = null;
+  let businessOwnerId = null;
+
+  if (normalizedEmail) {
+    try {
+      const mondayItem = await findBusinessOwnerByEmail(normalizedEmail);
+      if (mondayItem) {
+        displayName = mondayItem.name || displayName;
+
+        const columns = await getColumnIds('6400461985');
+        const phoneColumnIds = Object.entries(columns)
+          .filter(([title]) => {
+            const lower = title.toLowerCase();
+            return lower.includes('phone') || lower.includes('whatsapp');
+          })
+          .map(([, col]) => col.id);
+
+        const phoneColumn = mondayItem.column_values?.find(col => phoneColumnIds.includes(col.id) && col.text);
+        if (phoneColumn?.text) {
+          phoneNumber = phoneNumber || phoneColumn.text;
+        }
+
+        if (displayName && !firstName && !lastName) {
+          const nameParts = displayName.split(' ').filter(Boolean);
+          firstName = nameParts[0] || firstName;
+          lastName = nameParts.slice(1).join(' ') || lastName;
+        }
+      }
+    } catch (error) {
+      console.error('[Offboarding] Monday lookup failed:', error.message);
+    }
+
+    try {
+      const tfResult = await pool.query(
+        'SELECT first_name, last_name, phone FROM typeform_applications WHERE LOWER(email) = LOWER($1) ORDER BY created_at DESC LIMIT 1',
+        [normalizedEmail]
+      );
+      if (tfResult.rows[0]) {
+        firstName = firstName || tfResult.rows[0].first_name;
+        lastName = lastName || tfResult.rows[0].last_name;
+        phoneNumber = phoneNumber || tfResult.rows[0].phone;
+      }
+    } catch (error) {
+      console.error('[Offboarding] Typeform lookup failed:', error.message);
+    }
+
+    try {
+      const boResult = await pool.query(
+        'SELECT id, first_name, last_name, phone, whatsapp_number FROM business_owners WHERE LOWER(email) = LOWER($1) LIMIT 1',
+        [normalizedEmail]
+      );
+      if (boResult.rows[0]) {
+        businessOwnerId = boResult.rows[0].id;
+        firstName = firstName || boResult.rows[0].first_name;
+        lastName = lastName || boResult.rows[0].last_name;
+        phoneNumber = phoneNumber || boResult.rows[0].whatsapp_number || boResult.rows[0].phone;
+      }
+    } catch (error) {
+      console.error('[Offboarding] Business owner lookup failed:', error.message);
+    }
+
+    try {
+      const scResult = await pool.query(
+        'SELECT first_name, last_name, phone FROM samcart_orders WHERE LOWER(email) = LOWER($1) ORDER BY created_at DESC LIMIT 1',
+        [normalizedEmail]
+      );
+      if (scResult.rows[0]) {
+        firstName = firstName || scResult.rows[0].first_name;
+        lastName = lastName || scResult.rows[0].last_name;
+        phoneNumber = phoneNumber || scResult.rows[0].phone;
+      }
+    } catch (error) {
+      console.error('[Offboarding] SamCart lookup failed:', error.message);
+    }
+  }
+
+  if (!displayName) {
+    displayName = formatFullName(firstName, lastName) || normalizedEmail || 'Member';
+  }
+
+  if (!phoneNumber && phone) {
+    phoneNumber = phone;
+  }
+
+  const teamMembers = [];
+  const partners = [];
+
+  if (businessOwnerId) {
+    const tmResult = await pool.query(
+      'SELECT first_name, last_name, email, phone FROM team_members WHERE business_owner_id = $1',
+      [businessOwnerId]
+    );
+    tmResult.rows.forEach(row => {
+      teamMembers.push({
+        name: formatFullName(row.first_name, row.last_name) || row.email,
+        email: row.email,
+        phone: row.phone
+      });
+    });
+
+    const partnerResult = await pool.query(
+      'SELECT first_name, last_name, email, phone FROM c_level_partners WHERE business_owner_id = $1',
+      [businessOwnerId]
+    );
+    partnerResult.rows.forEach(row => {
+      partners.push({
+        name: formatFullName(row.first_name, row.last_name) || row.email,
+        email: row.email,
+        phone: row.phone
+      });
+    });
+  }
+
+  return {
+    email: normalizedEmail,
+    firstName,
+    lastName,
+    displayName,
+    phone: phoneNumber,
+    businessOwnerId,
+    teamMembers,
+    partners
+  };
+}
+
+async function performOffboardingActions(pool, context, thread, reasonLabel) {
+  const results = {
+    monday: null,
+    teamMembers: [],
+    circle: null,
+    wasender: [],
+    skippedPhones: []
+  };
+
+  const cancelDate = getDateKeyInTimeZone(new Date(), DEFAULT_TIMEZONE);
+
+  results.monday = await updateBusinessOwnerStatusByEmail(context.email, 'Canceled', cancelDate);
+
+  for (const member of context.teamMembers) {
+    if (!member.email) continue;
+    const updateResult = await updateTeamMemberStatusByEmail(member.email, 'Canceled');
+    results.teamMembers.push({ email: member.email, ...updateResult });
+  }
+
+  const partnersWithOwner = [
+    { name: context.displayName, email: context.email, phone: context.phone },
+    ...context.partners
+  ];
+
+  results.circle = await removeMembersFromCircle(context.teamMembers, partnersWithOwner);
+
+  const groupJids = [process.env.JID_AI, process.env.JID_TM, process.env.JID_BO].filter(Boolean);
+  const contacts = [
+    { name: context.displayName, email: context.email, phone: context.phone },
+    ...context.partners,
+    ...context.teamMembers
+  ];
+
+  const participants = new Map();
+  for (const contact of contacts) {
+    const normalized = normalizePhoneForWasender(contact.phone);
+    if (!normalized) {
+      results.skippedPhones.push({ name: contact.name, email: contact.email });
+      continue;
+    }
+    participants.set(normalized, contact);
+  }
+
+  for (const groupJid of groupJids) {
+    const response = await removeGroupParticipants(groupJid, Array.from(participants.keys()));
+    results.wasender.push({ groupJid, ...response });
+  }
+
+  if (thread?.id) {
+    const metadata = thread.metadata || {};
+    if (!metadata.offboarded_at) {
+      metadata.offboarded_at = new Date().toISOString();
+      metadata.offboarding_reason = reasonLabel || null;
+      await updateMemberThreadMetadata(pool, thread.id, metadata);
+    }
+  }
+
+  return results;
+}
+
 // SamCart webhook handler
 router.post('/samcart', async (req, res) => {
   try {
@@ -401,7 +881,254 @@ router.post('/samcart', async (req, res) => {
     console.log('SamCart webhook received:', JSON.stringify(payload, null, 2));
 
     // SamCart sends different event types
-    const eventType = payload.type || 'order'; // order, refund, subscription, etc.
+    const eventType = payload.type || payload.event_type || payload.event?.type || 'order';
+    const subscriptionEventType = mapSubscriptionEventType(eventType);
+
+    // Handle subscription events (monthly retries / cancellations)
+    if (subscriptionEventType) {
+      const email = extractSamcartEmail(payload);
+      const phone = extractSamcartPhone(payload);
+      const occurredAt = extractSamcartEventTimestamp(payload);
+      const periodKey = getMonthKeyInTimeZone(occurredAt, DEFAULT_TIMEZONE);
+      const eventKey = buildSamcartEventKey(payload, eventType);
+      const amount = extractSamcartAmount(payload);
+      const subscriptionId = extractSamcartSubscriptionId(payload);
+      const orderId = extractSamcartOrderId(payload);
+      const status = payload.status || payload.subscription?.status || payload.charge?.status || null;
+
+      if (!email) {
+        console.warn('[SamCart] Subscription event missing email');
+      }
+
+      const insertedId = await recordSubscriptionEvent(pool, {
+        eventKey,
+        eventType: subscriptionEventType,
+        email,
+        periodKey,
+        subscriptionId,
+        orderId,
+        amount,
+        currency: payload.currency || payload.order?.currency || 'USD',
+        status,
+        occurredAt,
+        rawData: payload
+      });
+
+      if (!insertedId) {
+        return res.status(200).json({ success: true, duplicate: true });
+      }
+
+      if (!email) {
+        return res.status(200).json({ success: true, event: subscriptionEventType, skipped: 'missing_email' });
+      }
+
+      const context = await resolveMemberContext(pool, email, phone);
+      const amountLabel = amount != null ? formatCurrency(amount) : 'N/A';
+      const firstName = context.firstName || (context.displayName || '').split(' ')[0] || '';
+      const displayName = context.displayName || email || 'Member';
+
+      if (subscriptionEventType === 'charge_failed') {
+        const existingThread = await getMemberThread(pool, email, 'monthly_bounce', periodKey);
+        let lastRecoveryAt = null;
+        if (existingThread?.metadata?.last_recovery_at) {
+          const parsed = new Date(existingThread.metadata.last_recovery_at);
+          if (!Number.isNaN(parsed.getTime())) {
+            lastRecoveryAt = parsed;
+          }
+        }
+        const attemptCount = await countSubscriptionFailures(pool, email, periodKey, lastRecoveryAt);
+        const summaryText = `⚠️ Subscription Charge Failed (Attempt #${attemptCount})\n*Name:* ${displayName}\n*Email:* ${email || 'N/A'}\n*Amount:* ${amountLabel}`;
+        const summaryBlocks = [
+          {
+            type: 'section',
+            text: { type: 'mrkdwn', text: summaryText }
+          }
+        ];
+
+        const threadResult = await createMemberThread(pool, {
+          email,
+          name: displayName,
+          threadType: 'monthly_bounce',
+          periodKey,
+          channelId: process.env.CA_PRO_NOTIFICATIONS_SLACK_CHANNEL,
+          summaryText,
+          summaryBlocks,
+          metadata: { period_key: periodKey }
+        });
+
+        const thread = threadResult?.thread || null;
+
+        if (thread?.slack_channel_id && thread?.slack_thread_ts) {
+          const attemptMessage = `Attempt #${attemptCount}: Charge failed — ${amountLabel}`;
+          await postMessage(thread.slack_channel_id, attemptMessage, [
+            { type: 'section', text: { type: 'mrkdwn', text: attemptMessage } }
+          ], thread.slack_thread_ts);
+
+          if (attemptCount === 1) {
+            const whatsappMessage = buildMonthlyBounceTemplate(firstName);
+            const whatsappBlock = createWhatsAppCopyBlock(whatsappMessage);
+            await postMessage(thread.slack_channel_id, whatsappBlock.text, whatsappBlock.blocks, thread.slack_thread_ts);
+          }
+        }
+
+        if (attemptCount >= 4) {
+          const alreadyOffboarded = thread?.metadata?.offboarded_at;
+          const offboardResults = alreadyOffboarded ? null : await performOffboardingActions(pool, context, thread, 'delinquent');
+
+          if (offboardResults && thread?.slack_channel_id && thread?.slack_thread_ts) {
+            const summaryLines = [
+              `🚫 Subscription delinquent after attempt #${attemptCount} — offboarding triggered.`,
+              `• Monday BO status: ${offboardResults.monday?.success ? 'updated' : 'failed'}`,
+              `• Team members updated: ${offboardResults.teamMembers.filter(t => t.success).length}`,
+              `• Circle removals: ${offboardResults.circle?.removed || 0} (${offboardResults.circle?.errors?.length || 0} errors)`,
+              `• WhatsApp removals: ${offboardResults.wasender.filter(r => r.success).length}/${offboardResults.wasender.length} groups`
+            ];
+            await postMessage(thread.slack_channel_id, summaryLines.join('\n'), [
+              { type: 'section', text: { type: 'mrkdwn', text: summaryLines.join('\n') } }
+            ], thread.slack_thread_ts);
+
+            if (offboardResults.skippedPhones.length > 0) {
+              const skippedLines = offboardResults.skippedPhones.map(p => `• ${p.name || 'Unknown'} (${p.email || 'no email'})`);
+              const skippedText = `⚠️ Skipped WhatsApp removal (missing phone):\n${skippedLines.join('\n')}`;
+              await postMessage(thread.slack_channel_id, skippedText, [
+                { type: 'section', text: { type: 'mrkdwn', text: skippedText } }
+              ], thread.slack_thread_ts);
+            }
+          }
+        }
+
+        return res.status(200).json({ success: true, event: subscriptionEventType });
+      }
+
+      if (subscriptionEventType === 'charged' || subscriptionEventType === 'recovered') {
+        const thread = await getMemberThread(pool, email, 'monthly_bounce', periodKey);
+        if (thread?.slack_channel_id && thread?.slack_thread_ts) {
+          const failures = await countSubscriptionFailures(pool, email, periodKey);
+          const metadata = thread.metadata || {};
+          if (failures > 0 && !metadata.recovery_posted_at) {
+            const recoveryText = `✅ Payment recovered after ${failures} failed attempt${failures === 1 ? '' : 's'} — ${amountLabel}`;
+            await postMessage(thread.slack_channel_id, recoveryText, [
+              { type: 'section', text: { type: 'mrkdwn', text: recoveryText } }
+            ], thread.slack_thread_ts);
+
+            metadata.recovery_posted_at = new Date().toISOString();
+            metadata.last_recovery_at = metadata.recovery_posted_at;
+            await updateMemberThreadMetadata(pool, thread.id, metadata);
+          }
+        }
+
+        return res.status(200).json({ success: true, event: subscriptionEventType });
+      }
+
+      if (subscriptionEventType === 'delinquent') {
+        const summaryText = `🚫 Subscription Delinquent\n*Name:* ${displayName}\n*Email:* ${email || 'N/A'}\n*Amount:* ${amountLabel}`;
+        const summaryBlocks = [
+          { type: 'section', text: { type: 'mrkdwn', text: summaryText } }
+        ];
+
+        const threadResult = await createMemberThread(pool, {
+          email,
+          name: displayName,
+          threadType: 'monthly_bounce',
+          periodKey,
+          channelId: process.env.CA_PRO_NOTIFICATIONS_SLACK_CHANNEL,
+          summaryText,
+          summaryBlocks,
+          metadata: { period_key: periodKey }
+        });
+
+        const thread = threadResult?.thread || null;
+        const alreadyOffboarded = thread?.metadata?.offboarded_at;
+        const offboardResults = alreadyOffboarded ? null : await performOffboardingActions(pool, context, thread, 'delinquent');
+
+        if (offboardResults && thread?.slack_channel_id && thread?.slack_thread_ts) {
+          const summaryLines = [
+            `🚫 Subscription delinquent — offboarding triggered.`,
+            `• Monday BO status: ${offboardResults.monday?.success ? 'updated' : 'failed'}`,
+            `• Team members updated: ${offboardResults.teamMembers.filter(t => t.success).length}`,
+            `• Circle removals: ${offboardResults.circle?.removed || 0} (${offboardResults.circle?.errors?.length || 0} errors)`,
+            `• WhatsApp removals: ${offboardResults.wasender.filter(r => r.success).length}/${offboardResults.wasender.length} groups`
+          ];
+          await postMessage(thread.slack_channel_id, summaryLines.join('\n'), [
+            { type: 'section', text: { type: 'mrkdwn', text: summaryLines.join('\n') } }
+          ], thread.slack_thread_ts);
+
+          if (offboardResults.skippedPhones.length > 0) {
+            const skippedLines = offboardResults.skippedPhones.map(p => `• ${p.name || 'Unknown'} (${p.email || 'no email'})`);
+            const skippedText = `⚠️ Skipped WhatsApp removal (missing phone):\n${skippedLines.join('\n')}`;
+            await postMessage(thread.slack_channel_id, skippedText, [
+              { type: 'section', text: { type: 'mrkdwn', text: skippedText } }
+            ], thread.slack_thread_ts);
+          }
+        }
+
+        return res.status(200).json({ success: true, event: subscriptionEventType });
+      }
+
+      if (subscriptionEventType === 'canceled') {
+        const cancelDateKey = getDateKeyInTimeZone(occurredAt, DEFAULT_TIMEZONE);
+        const summaryText = `🛑 Subscription Canceled\n*Name:* ${displayName}\n*Email:* ${email || 'N/A'}\n*Amount:* ${amountLabel}`;
+        const summaryBlocks = [
+          { type: 'section', text: { type: 'mrkdwn', text: summaryText } }
+        ];
+
+        const threadResult = await createMemberThread(pool, {
+          email,
+          name: displayName,
+          threadType: 'cancel',
+          periodKey: cancelDateKey,
+          channelId: process.env.CA_PRO_NOTIFICATIONS_SLACK_CHANNEL,
+          summaryText,
+          summaryBlocks,
+          metadata: { cancel_date: cancelDateKey }
+        });
+
+        const thread = threadResult?.thread || null;
+
+        await pool.query(
+          `
+            INSERT INTO cancellations (member_email, member_name, source, slack_channel_id, slack_thread_ts, member_thread_id)
+            VALUES ($1, $2, $3, $4, $5, $6)
+          `,
+          [
+            email,
+            displayName,
+            'samcart_webhook',
+            thread?.slack_channel_id || null,
+            thread?.slack_thread_ts || null,
+            thread?.id || null
+          ]
+        );
+
+        const alreadyOffboarded = thread?.metadata?.offboarded_at;
+        const offboardResults = alreadyOffboarded ? null : await performOffboardingActions(pool, context, thread, 'canceled');
+
+        if (offboardResults && thread?.slack_channel_id && thread?.slack_thread_ts) {
+          const summaryLines = [
+            `🛑 Cancellation received — offboarding triggered.`,
+            `• Monday BO status: ${offboardResults.monday?.success ? 'updated' : 'failed'}`,
+            `• Team members updated: ${offboardResults.teamMembers.filter(t => t.success).length}`,
+            `• Circle removals: ${offboardResults.circle?.removed || 0} (${offboardResults.circle?.errors?.length || 0} errors)`,
+            `• WhatsApp removals: ${offboardResults.wasender.filter(r => r.success).length}/${offboardResults.wasender.length} groups`
+          ];
+          await postMessage(thread.slack_channel_id, summaryLines.join('\n'), [
+            { type: 'section', text: { type: 'mrkdwn', text: summaryLines.join('\n') } }
+          ], thread.slack_thread_ts);
+
+          if (offboardResults.skippedPhones.length > 0) {
+            const skippedLines = offboardResults.skippedPhones.map(p => `• ${p.name || 'Unknown'} (${p.email || 'no email'})`);
+            const skippedText = `⚠️ Skipped WhatsApp removal (missing phone):\n${skippedLines.join('\n')}`;
+            await postMessage(thread.slack_channel_id, skippedText, [
+              { type: 'section', text: { type: 'mrkdwn', text: skippedText } }
+            ], thread.slack_thread_ts);
+          }
+        }
+
+        return res.status(200).json({ success: true, event: subscriptionEventType });
+      }
+
+      return res.status(200).json({ success: true, event: subscriptionEventType });
+    }
 
     // Extract customer data from SamCart payload
     // SamCart typically sends: customer object with email, name, phone
@@ -500,6 +1227,11 @@ router.post('/samcart', async (req, res) => {
     console.log(`New SamCart order received: ${result.rows[0].id}`);
     const orderId = result.rows[0].id;
 
+    // If yearly renewal purchase, log in renewal thread (async)
+    postYearlyPurchaseToRenewalThread(pool, orderData).catch(err => {
+      console.error('[SamCart] Error posting yearly renewal purchase:', err.message);
+    });
+
     // Post notification to #notifications-capro, then send welcome thread
     postSamCartNotification(pool, orderId, orderData).then(async (notifResult) => {
       if (!notifResult) return;
@@ -517,6 +1249,31 @@ router.post('/samcart', async (req, res) => {
       // Get the full order with thread info
       const orderResult = await pool.query('SELECT * FROM samcart_orders WHERE id = $1', [orderId]);
       const fullOrder = orderResult.rows[0];
+
+      if (orderData.email) {
+        try {
+          const contact = await resolveBusinessOwnerForWhatsAppAdd(pool, orderData.email, orderData);
+          const groupKeys = resolveGroupKeysForRole('business_owner');
+          const addResult = await addContactsToGroups({ contacts: [contact], groupKeys });
+          const summaryText = buildWhatsAppAddSummary({
+            label: `Business Owner ${contact.name || contact.email || ''}`.trim(),
+            groupResults: addResult.groupResults,
+            participantsCount: addResult.participants.length,
+            skipped: addResult.skipped,
+            missingGroupKeys: addResult.missingGroupKeys
+          });
+
+          if (fullOrder?.slack_channel_id && fullOrder?.slack_thread_ts) {
+            await postMessage(fullOrder.slack_channel_id, summaryText, [
+              { type: 'section', text: { type: 'mrkdwn', text: summaryText } }
+            ], fullOrder.slack_thread_ts);
+          } else {
+            console.log('[WhatsApp Add] Slack thread not found; skipping WhatsApp add log');
+          }
+        } catch (waError) {
+          console.error('[WhatsApp Add] Failed to add BO to groups:', waError.message);
+        }
+      }
 
       if (fullOrder && fullOrder.slack_thread_ts) {
         // Send welcome thread immediately
@@ -615,18 +1372,35 @@ Stefan`;
         console.log(`[AutoEmail] Email sent successfully! Thread ID: ${emailResult.threadId}, Message ID: ${emailResult.messageId}`);
 
         // Create email thread record
+        let slackThreadInfo = null;
+        try {
+          const slackResult = await pool.query(
+            'SELECT slack_channel_id, slack_thread_ts FROM typeform_applications WHERE id = $1',
+            [applicationId]
+          );
+          slackThreadInfo = slackResult.rows[0] || null;
+        } catch (e) {
+          slackThreadInfo = null;
+        }
+
         await pool.query(`
           INSERT INTO email_threads (
             gmail_thread_id, gmail_message_id, typeform_application_id,
-            recipient_email, recipient_first_name, subject, initial_email_sent_at, status
-          ) VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, 'sent')
+            recipient_email, recipient_first_name, subject, initial_email_sent_at, status,
+            context_type, context_id, slack_channel_id, slack_thread_ts, recipient_name
+          ) VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, 'sent', $7, $8, $9, $10, $11)
         `, [
           emailResult.threadId,
           emailResult.messageId,
           applicationId,
           recipientEmail,
           firstName,
-          subject
+          subject,
+          'typeform_application',
+          applicationId,
+          slackThreadInfo?.slack_channel_id || null,
+          slackThreadInfo?.slack_thread_ts || null,
+          `${firstName}`.trim() || recipientEmail
         ]);
 
         // Update typeform_applications with emailed_at timestamp

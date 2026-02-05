@@ -17,6 +17,19 @@ const BOARDS = {
   PRO_TEAM_MEMBERS: '6414054485'
 };
 
+const COLUMN_IDS = {
+  PRO_BUSINESS_OWNERS: {
+    NEXT_PAYMENT_DUE_DATE: 'dup__of_start_date',
+    AMOUNT: 'numbers',
+    MRR: 'numbers3',
+    STATUS: 'status',
+    PAUSED_CANCELED_DATE: 'date1'
+  },
+  PRO_TEAM_MEMBERS: {
+    STATUS: 'status'
+  }
+};
+
 // Cache for column IDs (populated on first use)
 let columnCache = {};
 
@@ -103,6 +116,171 @@ async function getColumnIds(boardId) {
   console.log(`[Monday] Cached ${Object.keys(columnMap).length} columns for board ${boardId}`);
 
   return columnMap;
+}
+
+function extractColumnText(item, columnId) {
+  if (!item || !columnId) return null;
+  const column = (item.column_values || []).find(col => col.id === columnId);
+  return column?.text || null;
+}
+
+function extractColumnValue(item, columnId) {
+  if (!item || !columnId) return null;
+  const column = (item.column_values || []).find(col => col.id === columnId);
+  return column?.value || null;
+}
+
+/**
+ * Get Business Owners with Next Payment Due Date matching a given date (YYYY-MM-DD)
+ */
+async function getBusinessOwnersByNextPaymentDueDate(dateKey) {
+  if (!isConfigured()) {
+    console.log('[Monday] Not configured, skipping renewal lookup');
+    return [];
+  }
+
+  const query = `
+    query ($boardId: ID!, $columnId: String!, $value: String!) {
+      items_page_by_column_values(
+        board_id: $boardId,
+        columns: [{ column_id: $columnId, column_values: [$value] }],
+        limit: 100
+      ) {
+        items {
+          id
+          name
+          column_values {
+            id
+            text
+            value
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const data = await mondayRequest(query, {
+      boardId: BOARDS.PRO_BUSINESS_OWNERS,
+      columnId: COLUMN_IDS.PRO_BUSINESS_OWNERS.NEXT_PAYMENT_DUE_DATE,
+      value: dateKey
+    });
+    return data.items_page_by_column_values?.items || [];
+  } catch (error) {
+    console.error('[Monday] Error fetching items by due date:', error.message);
+    return [];
+  }
+}
+
+/**
+ * Update Business Owner status + paused/canceled date by email
+ */
+async function updateBusinessOwnerStatusByEmail(email, statusLabel, canceledDate) {
+  if (!isConfigured() || !email) return { success: false, reason: 'not_configured_or_email_missing' };
+
+  const businessOwner = await findBusinessOwnerByEmail(email);
+  if (!businessOwner?.id) {
+    return { success: false, reason: 'not_found' };
+  }
+
+  const columnValues = {
+    [COLUMN_IDS.PRO_BUSINESS_OWNERS.STATUS]: { label: statusLabel }
+  };
+
+  if (canceledDate) {
+    columnValues[COLUMN_IDS.PRO_BUSINESS_OWNERS.PAUSED_CANCELED_DATE] = { date: canceledDate };
+  }
+
+  const query = `
+    mutation ($boardId: ID!, $itemId: ID!, $values: JSON!) {
+      change_multiple_column_values(
+        board_id: $boardId,
+        item_id: $itemId,
+        column_values: $values
+      ) {
+        id
+      }
+    }
+  `;
+
+  try {
+    await mondayRequest(query, {
+      boardId: BOARDS.PRO_BUSINESS_OWNERS,
+      itemId: businessOwner.id,
+      values: JSON.stringify(columnValues)
+    });
+    return { success: true, itemId: businessOwner.id };
+  } catch (error) {
+    console.error('[Monday] Failed to update business owner status:', error.message);
+    return { success: false, reason: error.message };
+  }
+}
+
+/**
+ * Update Team Member status by email
+ */
+async function updateTeamMemberStatusByEmail(email, statusLabel) {
+  if (!isConfigured() || !email) return { success: false, reason: 'not_configured_or_email_missing' };
+
+  const columns = await getColumnIds(BOARDS.PRO_TEAM_MEMBERS);
+  const emailCol = columns['Email'];
+  if (!emailCol) {
+    return { success: false, reason: 'email_column_missing' };
+  }
+
+  const query = `
+    query ($boardId: ID!, $columnId: String!, $value: String!) {
+      items_page_by_column_values(
+        board_id: $boardId,
+        columns: [{ column_id: $columnId, column_values: [$value] }],
+        limit: 5
+      ) {
+        items {
+          id
+        }
+      }
+    }
+  `;
+
+  try {
+    const data = await mondayRequest(query, {
+      boardId: BOARDS.PRO_TEAM_MEMBERS,
+      columnId: emailCol.id,
+      value: email.toLowerCase()
+    });
+
+    const items = data.items_page_by_column_values?.items || [];
+    if (items.length === 0) {
+      return { success: false, reason: 'not_found' };
+    }
+
+    const updateQuery = `
+      mutation ($boardId: ID!, $itemId: ID!, $values: JSON!) {
+        change_multiple_column_values(
+          board_id: $boardId,
+          item_id: $itemId,
+          column_values: $values
+        ) {
+          id
+        }
+      }
+    `;
+
+    for (const item of items) {
+      await mondayRequest(updateQuery, {
+        boardId: BOARDS.PRO_TEAM_MEMBERS,
+        itemId: item.id,
+        values: JSON.stringify({
+          [COLUMN_IDS.PRO_TEAM_MEMBERS.STATUS]: { label: statusLabel }
+        })
+      });
+    }
+
+    return { success: true, updated: items.length };
+  } catch (error) {
+    console.error('[Monday] Failed to update team member status:', error.message);
+    return { success: false, reason: error.message };
+  }
 }
 
 /**
@@ -850,6 +1028,11 @@ module.exports = {
   syncPartnersToMonday,
   syncOnboardingToMonday,
   updateBusinessOwnerCompany,
+  getBusinessOwnersByNextPaymentDueDate,
+  updateBusinessOwnerStatusByEmail,
+  updateTeamMemberStatusByEmail,
+  extractColumnText,
+  extractColumnValue,
   createBusinessOwnerItem,
   businessOwnerExistsInMonday,
   BOARDS
