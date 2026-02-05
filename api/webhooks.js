@@ -373,7 +373,7 @@ async function postSamCartNotification(pool, orderId, orderData) {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `*Order ID:* ${orderData.samcart_order_id || 'N/A'}\n*Product:* ${orderData.product_name || 'CA Pro Membership'}\n*Amount:* ${amountLabel}\n----------------------------------\n*Name:* ${customerName}\n*Email:* ${orderData.email || 'N/A'}`
+        text: `🎉 *Order Complete*\n*Order ID:* ${orderData.samcart_order_id || 'N/A'}\n*Product:* ${orderData.product_name || 'CA Pro Membership'}\n*Amount:* ${amountLabel}\n----------------------------------\n*Name:* ${customerName}\n*Email:* ${orderData.email || 'N/A'}`
       }
     }
   ];
@@ -441,18 +441,43 @@ function normalizeSamcartEventType(rawType) {
   return (rawType || '').toString().trim().toLowerCase().replace(/[_\.]+/g, ' ');
 }
 
+function normalizeSamcartEventTypeForMatch(rawType) {
+  const raw = (rawType || '').toString().trim();
+  if (!raw) return '';
+  const withSpaces = raw.replace(/[_\.]+/g, ' ').replace(/([a-z0-9])([A-Z])/g, '$1 $2');
+  return withSpaces.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
 function mapSubscriptionEventType(rawType) {
-  const normalized = normalizeSamcartEventType(rawType);
-  if (!normalized.includes('subscription')) return null;
+  const normalized = normalizeSamcartEventTypeForMatch(rawType);
+  if (!normalized) return null;
 
-  if (normalized.includes('charge failed')) return 'charge_failed';
-  if (normalized.includes('charged')) return 'charged';
-  if (normalized.includes('recovered')) return 'recovered';
-  if (normalized.includes('delinquent')) return 'delinquent';
-  if (normalized.includes('canceled') || normalized.includes('cancelled')) return 'canceled';
-  if (normalized.includes('completed')) return 'completed';
+  if (normalized.includes('recurring payment failed')) return 'charge_failed';
+  if (normalized.includes('recurring payment recovered')) return 'recovered';
+  if (normalized.includes('recurring payment succeeded') || normalized.includes('recurring payment success')) return 'charged';
 
-  return 'subscription_event';
+  if (normalized.includes('subscription charge failed')) return 'charge_failed';
+  if (normalized.includes('subscription charged') || normalized.includes('subscription charge succeeded')) return 'charged';
+  if (normalized.includes('subscription recovered')) return 'recovered';
+
+  if (normalized.includes('subscription delinquent') || normalized.includes('delinquent')) return 'delinquent';
+  if (normalized.includes('subscription canceled') || normalized.includes('subscription cancelled')) return 'canceled';
+  if (normalized === 'cancel' || normalized === 'canceled' || normalized === 'cancelled') return 'canceled';
+
+  if (normalized.includes('subscription')) return 'subscription_event';
+
+  return null;
+}
+
+function isOrderEventType(rawType) {
+  const normalized = normalizeSamcartEventTypeForMatch(rawType);
+  if (!normalized) return false;
+  return (
+    normalized === 'order' ||
+    normalized === 'order complete' ||
+    normalized === 'order completed' ||
+    normalized === 'order paid'
+  );
 }
 
 function extractSamcartEmail(payload) {
@@ -882,7 +907,7 @@ router.post('/samcart', async (req, res) => {
     console.log('SamCart webhook received:', JSON.stringify(payload, null, 2));
 
     // SamCart sends different event types
-    const eventType = payload.type || payload.event_type || payload.event?.type || 'order';
+    const eventType = payload.type || payload.event_type || payload.event?.type || payload.event?.event_type || payload.action || null;
     const subscriptionEventType = mapSubscriptionEventType(eventType);
 
     // Handle subscription events (monthly retries / cancellations)
@@ -1129,6 +1154,12 @@ router.post('/samcart', async (req, res) => {
       }
 
       return res.status(200).json({ success: true, event: subscriptionEventType });
+    }
+
+    const isOrderEvent = isOrderEventType(eventType);
+    if (!isOrderEvent) {
+      console.log(`[SamCart] Ignoring non-order event: ${eventType || 'unknown'}`);
+      return res.status(200).json({ success: true, ignored: true, event: eventType || null });
     }
 
     // Extract customer data from SamCart payload
