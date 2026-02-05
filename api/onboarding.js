@@ -116,6 +116,31 @@ async function postWhatsAppAddSummaryToThread(pool, email, label, groupKeys, con
   return true;
 }
 
+function formatPhoneForLabel(phone) {
+  if (!phone) return null;
+  const digits = phone.toString().replace(/\D/g, '');
+  if (!digits) return null;
+  const normalized = digits.length >= 10 ? digits.slice(-10) : digits;
+  if (normalized.length === 10) {
+    return `${normalized.slice(0, 3)}-${normalized.slice(3, 6)}-${normalized.slice(6)}`;
+  }
+  return normalized;
+}
+
+function buildContactsLabel(contacts, fallbackLabel) {
+  const entries = (contacts || [])
+    .map(contact => {
+      const phoneLabel = formatPhoneForLabel(contact.phone);
+      if (!phoneLabel) return null;
+      const name = contact.name || contact.email || 'Unknown';
+      return `${name} (${phoneLabel})`;
+    })
+    .filter(Boolean);
+
+  if (entries.length === 0) return fallbackLabel;
+  return `${entries.join(', ')} added`;
+}
+
 // Helper to send Slack welcome message as a thread
 async function sendSlackWelcome(answers, teamMembers, cLevelPartners, pool) {
   const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
@@ -752,7 +777,8 @@ router.post('/save-progress', async (req, res) => {
             phone: member.phone
           }));
           const groupKeys = resolveGroupKeysForRole('team_member');
-          postWhatsAppAddSummaryToThread(pool, answers.email, 'Team members added', groupKeys, contacts)
+          const label = buildContactsLabel(contacts, 'Team members added');
+          postWhatsAppAddSummaryToThread(pool, answers.email, label, groupKeys, contacts)
             .catch(err => console.error('[WhatsApp Add] Failed to add team members:', err.message));
         }
       }
@@ -784,7 +810,8 @@ router.post('/save-progress', async (req, res) => {
             phone: partner.phone
           }));
           const groupKeys = resolveGroupKeysForRole('partner');
-          postWhatsAppAddSummaryToThread(pool, answers.email, 'Partners added', groupKeys, contacts)
+          const label = buildContactsLabel(contacts, 'Partners added');
+          postWhatsAppAddSummaryToThread(pool, answers.email, label, groupKeys, contacts)
             .catch(err => console.error('[WhatsApp Add] Failed to add partners:', err.message));
         }
       }

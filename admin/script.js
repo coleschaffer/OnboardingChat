@@ -896,6 +896,7 @@ async function viewApplication(id, options = {}) {
             footer: `
                 <button class="btn btn-secondary btn-sm" type="button" onclick="convertApplication('${id}')">Convert to Member</button>
                 <button class="btn btn-secondary btn-sm" type="button" onclick="simulateSubscriptionFailures('${id}')">Simulate Charge Failed</button>
+                <button class="btn btn-secondary btn-sm" type="button" onclick="simulateSubscriptionRecovered('${id}')">Simulate Recovered</button>
                 <button class="btn btn-secondary btn-sm" type="button" onclick="simulateSubscriptionCancel('${id}')">Simulate Subscription Canceled</button>
                 <button class="btn btn-secondary btn-sm" type="button" onclick="runYearlyRenewalsForce()">Run Yearly Renewals (Force)</button>
             `
@@ -970,6 +971,18 @@ async function simulateSubscriptionCancel(applicationId) {
         showToast('Simulated subscription canceled event', 'success');
     } catch (error) {
         showToast(error.message || 'Failed to simulate subscription cancel', 'error');
+    }
+}
+
+async function simulateSubscriptionRecovered(applicationId) {
+    const confirmed = confirm('Simulate a Subscription Recovered event for this member?');
+    if (!confirmed) return;
+
+    try {
+        await fetchAPI(`/applications/${applicationId}/test-subscription-recovered`, { method: 'POST' });
+        showToast('Simulated subscription recovered event', 'success');
+    } catch (error) {
+        showToast(error.message || 'Failed to simulate subscription recovered', 'error');
     }
 }
 

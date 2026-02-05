@@ -296,7 +296,7 @@ router.post('/:id/test-subscription-failure', async (req, res) => {
 
     const orderResult = await pool.query(
       `
-        SELECT samcart_order_id, subscription_id, order_total, currency
+        SELECT samcart_order_id, order_total, currency
         FROM samcart_orders
         WHERE LOWER(email) = LOWER($1)
         ORDER BY created_at DESC
@@ -318,7 +318,7 @@ router.post('/:id/test-subscription-failure', async (req, res) => {
           last_name: app.last_name,
           phone: app.phone
         },
-        subscription_id: order.subscription_id || `test-subscription-${app.id}`,
+        subscription_id: order.samcart_order_id || `test-subscription-${app.id}`,
         order_id: order.samcart_order_id || `test-order-${app.id}`,
         amount: order.order_total || 5000,
         currency: order.currency || 'USD',
@@ -357,7 +357,7 @@ router.post('/:id/test-subscription-cancel', async (req, res) => {
 
     const orderResult = await pool.query(
       `
-        SELECT samcart_order_id, subscription_id, order_total, currency
+        SELECT samcart_order_id, order_total, currency
         FROM samcart_orders
         WHERE LOWER(email) = LOWER($1)
         ORDER BY created_at DESC
@@ -377,7 +377,7 @@ router.post('/:id/test-subscription-cancel', async (req, res) => {
         last_name: app.last_name,
         phone: app.phone
       },
-      subscription_id: order.subscription_id || `test-subscription-${app.id}`,
+      subscription_id: order.samcart_order_id || `test-subscription-${app.id}`,
       order_id: order.samcart_order_id || `test-order-${app.id}`,
       amount: order.order_total || 5000,
       currency: order.currency || 'USD',
@@ -389,6 +389,62 @@ router.post('/:id/test-subscription-cancel', async (req, res) => {
   } catch (error) {
     console.error('Error simulating subscription cancel:', error);
     res.status(500).json({ error: error.message || 'Failed to simulate subscription cancel' });
+  }
+});
+
+// Test helper: simulate SamCart subscription recovered for this application
+router.post('/:id/test-subscription-recovered', async (req, res) => {
+  try {
+    const pool = req.app.locals.pool;
+    const { id } = req.params;
+
+    const appResult = await pool.query(
+      'SELECT id, email, first_name, last_name, phone FROM typeform_applications WHERE id = $1',
+      [id]
+    );
+    if (appResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Application not found' });
+    }
+
+    const app = appResult.rows[0];
+    if (!app.email) {
+      return res.status(400).json({ error: 'Application missing email' });
+    }
+
+    const orderResult = await pool.query(
+      `
+        SELECT samcart_order_id, order_total, currency
+        FROM samcart_orders
+        WHERE LOWER(email) = LOWER($1)
+        ORDER BY created_at DESC
+        LIMIT 1
+      `,
+      [app.email]
+    );
+    const order = orderResult.rows[0] || {};
+
+    const payload = {
+      type: 'Subscription Recovered',
+      event_id: `test-${crypto.randomUUID()}`,
+      event_timestamp: new Date().toISOString(),
+      customer: {
+        email: app.email,
+        first_name: app.first_name,
+        last_name: app.last_name,
+        phone: app.phone
+      },
+      subscription_id: order.samcart_order_id || `test-subscription-${app.id}`,
+      order_id: order.samcart_order_id || `test-order-${app.id}`,
+      amount: order.order_total || 5000,
+      currency: order.currency || 'USD',
+      status: 'recovered'
+    };
+
+    const data = await postSamcartTestWebhook(payload);
+    res.json({ success: true, result: data });
+  } catch (error) {
+    console.error('Error simulating subscription recovered:', error);
+    res.status(500).json({ error: error.message || 'Failed to simulate subscription recovered' });
   }
 });
 

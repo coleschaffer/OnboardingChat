@@ -365,14 +365,15 @@ async function postSamCartNotification(pool, orderId, orderData) {
   }
 
   const customerName = [orderData.first_name, orderData.last_name].filter(Boolean).join(' ') || 'N/A';
-  const amount = orderData.order_total ? parseFloat(orderData.order_total).toFixed(2) : 'N/A';
+  const amount = orderData.order_total ? formatCurrency(orderData.order_total) : null;
+  const amountLabel = amount || 'N/A';
 
   const blocks = [
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `*Order ID:* ${orderData.samcart_order_id || 'N/A'}\n*Product:* ${orderData.product_name || 'CA Pro Membership'}\n*Amount:* ${amount}\n----------------------------------\n*Name:* ${customerName}\n*Email:* ${orderData.email || 'N/A'}`
+        text: `*Order ID:* ${orderData.samcart_order_id || 'N/A'}\n*Product:* ${orderData.product_name || 'CA Pro Membership'}\n*Amount:* ${amountLabel}\n----------------------------------\n*Name:* ${customerName}\n*Email:* ${orderData.email || 'N/A'}`
       }
     }
   ];
@@ -1260,7 +1261,8 @@ router.post('/samcart', async (req, res) => {
             groupResults: addResult.groupResults,
             participantsCount: addResult.participants.length,
             skipped: addResult.skipped,
-            missingGroupKeys: addResult.missingGroupKeys
+            missingGroupKeys: addResult.missingGroupKeys,
+            hideParticipantCount: true
           });
 
           if (fullOrder?.slack_channel_id && fullOrder?.slack_thread_ts) {
@@ -1269,6 +1271,17 @@ router.post('/samcart', async (req, res) => {
             ], fullOrder.slack_thread_ts);
           } else {
             console.log('[WhatsApp Add] Slack thread not found; skipping WhatsApp add log');
+          }
+
+          if (addResult.groupResults.some(result => result.result?.success)) {
+            await pool.query(
+              `
+                UPDATE typeform_applications
+                SET whatsapp_joined_at = CURRENT_TIMESTAMP
+                WHERE LOWER(email) = LOWER($1) AND whatsapp_joined_at IS NULL
+              `,
+              [orderData.email]
+            );
           }
         } catch (waError) {
           console.error('[WhatsApp Add] Failed to add BO to groups:', waError.message);
