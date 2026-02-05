@@ -477,16 +477,134 @@ async function removeMemberFromAccessGroup({ community, email, accessGroupId }) 
   }
 }
 
+async function searchCommunityMemberByEmail({ community, email }) {
+  const config = CIRCLE_CONFIG[community];
+  if (!config || !email) return null;
+
+  const token = getCircleToken(community);
+  if (!token) return null;
+
+  const endpoints = [
+    `${config.baseUrl}/community_members/search?query=${encodeURIComponent(email)}`,
+    `${config.baseUrl}/community_members?email=${encodeURIComponent(email)}`
+  ];
+
+  for (const endpoint of endpoints) {
+    try {
+      const response = await fetch(endpoint, {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Token ${token}`
+        }
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) continue;
+
+      const records = data.records || data.community_members || data.members || data.data || data;
+      if (Array.isArray(records)) {
+        const match = records.find(record => (record.email || '').toLowerCase() === email.toLowerCase());
+        if (match?.id) return match;
+      }
+
+      if (data.community_member?.id && (data.community_member.email || '').toLowerCase() === email.toLowerCase()) {
+        return data.community_member;
+      }
+
+      if (data.id && (data.email || '').toLowerCase() === email.toLowerCase()) {
+        return data;
+      }
+    } catch (error) {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+async function removeCommunityMemberByEmail({ community, email }) {
+  const config = CIRCLE_CONFIG[community];
+  if (!config) {
+    return { success: false, community, email, error: `Unknown Circle community: ${community}` };
+  }
+
+  const token = getCircleToken(community);
+  if (!token) {
+    return { success: false, community, email, error: `No API token configured for ${community}` };
+  }
+
+  if (!email) {
+    return { success: false, community, email, error: 'Missing email' };
+  }
+
+  // Attempt direct delete with email payload (some APIs support this)
+  try {
+    const response = await fetch(`${config.baseUrl}/community_members`, {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Token ${token}`
+      },
+      body: JSON.stringify({ email })
+    });
+
+    if (response.ok) {
+      return { success: true, community, email, method: 'delete_by_email' };
+    }
+
+    const data = await response.json().catch(() => ({}));
+    const errorMessage = data.message || data.error || JSON.stringify(data);
+    // Continue to ID lookup fallback
+  } catch (error) {
+    // Continue to ID lookup fallback
+  }
+
+  const member = await searchCommunityMemberByEmail({ community, email });
+  if (!member?.id) {
+    return { success: false, community, email, error: 'community_member_not_found' };
+  }
+
+  try {
+    const response = await fetch(`${config.baseUrl}/community_members/${member.id}`, {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Token ${token}`
+      }
+    });
+
+    if (response.ok) {
+      return { success: true, community, email, method: 'delete_by_id', id: member.id };
+    }
+
+    const data = await response.json().catch(() => ({}));
+    const errorMessage = data.message || data.error || JSON.stringify(data);
+    return { success: false, community, email, error: errorMessage };
+  } catch (error) {
+    return { success: false, community, email, error: error.message };
+  }
+}
+
 /**
  * Remove members from Circle communities (CA + SPG)
  */
 async function removeMembersFromCircle(teamMembers = [], partners = []) {
   const results = {
     removed: 0,
+    removedAccessGroups: 0,
+    removedMembers: 0,
     errors: []
   };
 
   const removeTasks = [];
+
+  const emails = new Set();
+  teamMembers.forEach(member => {
+    if (member?.email) emails.add(member.email.toLowerCase());
+  });
+  partners.forEach(member => {
+    if (member?.email) emails.add(member.email.toLowerCase());
+  });
 
   for (const member of teamMembers) {
     if (!member.email) continue;
@@ -520,9 +638,30 @@ async function removeMembersFromCircle(teamMembers = [], partners = []) {
   for (const response of responses) {
     if (response.success) {
       results.removed += 1;
+      results.removedAccessGroups += 1;
     } else {
       results.errors.push(response);
     }
+  }
+
+  const memberRemovalTasks = [];
+  for (const email of emails) {
+    memberRemovalTasks.push(removeCommunityMemberByEmail({ community: 'CA', email }));
+    memberRemovalTasks.push(removeCommunityMemberByEmail({ community: 'SPG', email }));
+  }
+
+  const memberRemovalResponses = await Promise.all(memberRemovalTasks);
+  for (const response of memberRemovalResponses) {
+    if (response.success) {
+      results.removed += 1;
+      results.removedMembers += 1;
+    } else {
+      results.errors.push(response);
+    }
+  }
+
+  if (results.errors.length > 0) {
+    console.error('[Circle] Removal errors:', results.errors);
   }
 
   return results;
@@ -535,5 +674,6 @@ module.exports = {
   syncAllToCircle,
   removeMemberFromAccessGroup,
   removeMembersFromCircle,
+  removeCommunityMemberByEmail,
   CIRCLE_CONFIG
 };
