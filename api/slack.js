@@ -45,6 +45,337 @@ function extractEmailFromSlackMessage(message) {
     return match?.[0] || null;
 }
 
+function escapeMrkdwn(value) {
+    return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+function cleanLookupText(rawText) {
+    return (rawText || '')
+        .replace(/<@[A-Z0-9]+>/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function formatName(firstName, lastName) {
+    const full = [firstName, lastName].map(v => (v || '').trim()).filter(Boolean).join(' ').trim();
+    return full || 'Unknown';
+}
+
+function truncateText(value, maxLen = 220) {
+    const text = String(value || '').trim();
+    if (!text) return 'N/A';
+    if (text.length <= maxLen) return text;
+    return `${text.slice(0, maxLen - 1)}…`;
+}
+
+function formatDateTime(value) {
+    if (!value) return 'N/A';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return 'N/A';
+    return date.toLocaleString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit'
+    });
+}
+
+function parseMemberLookupQuery(rawText) {
+    const cleaned = cleanLookupText(rawText)
+        .replace(/^(find|lookup|search|get)\s+/i, '')
+        .trim();
+    if (!cleaned) return null;
+
+    const emailMatch = cleaned.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+    if (emailMatch?.[0]) {
+        return {
+            type: 'email',
+            email: emailMatch[0].trim()
+        };
+    }
+
+    const parts = cleaned
+        .split(' ')
+        .map(part => part.replace(/^[,.;:!?]+|[,.;:!?]+$/g, ''))
+        .filter(Boolean);
+    if (parts.length === 0) return null;
+
+    if (parts.length >= 2) {
+        return {
+            type: 'full_name',
+            firstName: parts[0].trim(),
+            lastName: parts.slice(1).join(' ').trim()
+        };
+    }
+
+    return {
+        type: 'first_name',
+        firstName: parts[0].trim()
+    };
+}
+
+function describeLookupQuery(query) {
+    if (!query) return '';
+    if (query.type === 'email') return query.email || '';
+    return [query.firstName, query.lastName].filter(Boolean).join(' ').trim();
+}
+
+async function findTypeformMatches(pool, query) {
+    const params = [];
+    let whereClause = '';
+
+    if (query.type === 'email') {
+        whereClause = 'LOWER(ta.email) = LOWER($1)';
+        params.push(query.email);
+    } else if (query.type === 'full_name') {
+        whereClause = 'LOWER(TRIM(ta.first_name)) = LOWER(TRIM($1)) AND LOWER(TRIM(ta.last_name)) = LOWER(TRIM($2))';
+        params.push(query.firstName, query.lastName);
+    } else {
+        whereClause = 'LOWER(TRIM(ta.first_name)) = LOWER(TRIM($1))';
+        params.push(query.firstName);
+    }
+
+    const result = await pool.query(`
+        WITH latest_per_email AS (
+            SELECT DISTINCT ON (COALESCE(LOWER(ta.email), ta.id::text))
+                ta.*
+            FROM typeform_applications ta
+            WHERE ${whereClause}
+            ORDER BY COALESCE(LOWER(ta.email), ta.id::text), ta.created_at DESC
+        )
+        SELECT *
+        FROM latest_per_email
+        ORDER BY created_at DESC
+        LIMIT 25
+    `, params);
+
+    return result.rows;
+}
+
+async function getLatestOnboardingContextByEmail(pool, email) {
+    if (!email) return null;
+
+    const result = await pool.query(`
+        SELECT
+            bo.id AS business_owner_id,
+            bo.first_name AS bo_first_name,
+            bo.last_name AS bo_last_name,
+            bo.email AS bo_email,
+            bo.business_name AS bo_business_name,
+            bo.team_count AS bo_team_count,
+            bo.annual_revenue AS bo_annual_revenue,
+            bo.whatsapp_joined AS bo_whatsapp_joined,
+            os.id AS onboarding_submission_id,
+            os.data AS onboarding_data,
+            os.progress_percentage AS onboarding_progress,
+            os.is_complete AS onboarding_is_complete,
+            os.created_at AS onboarding_created_at,
+            os.updated_at AS onboarding_updated_at,
+            os.completed_at AS onboarding_completed_at
+        FROM business_owners bo
+        LEFT JOIN LATERAL (
+            SELECT id, data, progress_percentage, is_complete, created_at, updated_at, completed_at
+            FROM onboarding_submissions
+            WHERE business_owner_id = bo.id
+            ORDER BY created_at DESC
+            LIMIT 1
+        ) os ON true
+        WHERE LOWER(bo.email) = LOWER($1)
+        LIMIT 1
+    `, [email]);
+
+    return result.rows[0] || null;
+}
+
+function buildAmbiguousLookupBlocks(matches, query) {
+    const queryLabel = describeLookupQuery(query);
+    const displayed = matches.slice(0, 15);
+    const options = displayed
+        .map((row, index) => {
+            const fullName = escapeMrkdwn(formatName(row.first_name, row.last_name));
+            const email = row.email ? ` (${escapeMrkdwn(row.email)})` : '';
+            return `${index + 1}. *${fullName}*${email}`;
+        })
+        .join('\n');
+    const hiddenCount = Math.max(matches.length - displayed.length, 0);
+
+    return [
+        {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: `I found multiple members for *${escapeMrkdwn(queryLabel)}* (${matches.length} matches).`
+            }
+        },
+        {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: options
+            }
+        },
+        ...(hiddenCount > 0 ? [{
+            type: 'context',
+            elements: [{
+                type: 'mrkdwn',
+                text: `…and ${hiddenCount} more`
+            }]
+        }] : []),
+        {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: 'Reply with the *full name* (first + last) or *email* so I can pull the exact record.'
+            }
+        }
+    ];
+}
+
+function buildMemberLookupBlocks(typeformRow, onboardingContext) {
+    const typeformName = formatName(typeformRow.first_name, typeformRow.last_name);
+    const sourceLabel = onboardingContext?.onboarding_submission_id ? 'Typeform + Onboarding Chat' : 'Typeform only';
+    const typeformAnythingElse = typeformRow.anything_else || typeformRow.additional_info || '';
+
+    const typeformLines = [
+        `*Name:* ${escapeMrkdwn(typeformName)}`,
+        `*Email:* ${escapeMrkdwn(typeformRow.email || 'N/A')}`,
+        `*Phone:* ${escapeMrkdwn(typeformRow.phone || 'N/A')}`,
+        `*Submitted:* ${escapeMrkdwn(formatDateTime(typeformRow.created_at))}`,
+        `*Best Way to Reach:* ${escapeMrkdwn(truncateText(typeformRow.contact_preference || 'N/A', 120))}`,
+        `*Business Description:* ${escapeMrkdwn(truncateText(typeformRow.business_description || 'N/A'))}`,
+        `*Annual Revenue:* ${escapeMrkdwn(truncateText(typeformRow.annual_revenue || 'N/A', 120))}`,
+        `*Revenue Trend:* ${escapeMrkdwn(truncateText(typeformRow.revenue_trend || 'N/A', 120))}`,
+        `*#1 Challenge:* ${escapeMrkdwn(truncateText(typeformRow.main_challenge || 'N/A'))}`,
+        `*Why CA Pro:* ${escapeMrkdwn(truncateText(typeformRow.why_ca_pro || 'N/A'))}`,
+        `*Investment Readiness:* ${escapeMrkdwn(truncateText(typeformRow.investment_readiness || 'N/A', 120))}`,
+        `*Decision Timeline:* ${escapeMrkdwn(truncateText(typeformRow.decision_timeline || 'N/A', 120))}`,
+        `*Has Team:* ${escapeMrkdwn(String(typeformRow.has_team || 'N/A'))}`,
+        `*Anything Else:* ${escapeMrkdwn(truncateText(typeformAnythingElse || 'N/A'))}`,
+        `*Referral Source:* ${escapeMrkdwn(truncateText(typeformRow.referral_source || 'N/A', 120))}`
+    ];
+
+    let onboardingText = '_No Onboarding Chat submission found yet for this member._';
+    if (onboardingContext?.onboarding_submission_id) {
+        const onboardingData = onboardingContext.onboarding_data || {};
+        const answers = onboardingData.answers || {};
+        const onboardingTeamMembers = Array.isArray(onboardingData.teamMembers) ? onboardingData.teamMembers.length : 0;
+        const onboardingPartners = Array.isArray(onboardingData.cLevelPartners) ? onboardingData.cLevelPartners.length : 0;
+        const statusLabel = onboardingContext.onboarding_is_complete ? 'Complete' : 'In Progress';
+
+        const onboardingLines = [
+            `*Submission Status:* ${statusLabel} (${onboardingContext.onboarding_progress || 0}% progress)`,
+            `*Updated:* ${escapeMrkdwn(formatDateTime(onboardingContext.onboarding_updated_at || onboardingContext.onboarding_created_at))}`,
+            `*Business Name:* ${escapeMrkdwn(truncateText(answers.businessName || onboardingContext.bo_business_name || 'N/A', 120))}`,
+            `*Team Count:* ${escapeMrkdwn(String(answers.teamCount || onboardingContext.bo_team_count || 'N/A'))}`,
+            `*Traffic Sources:* ${escapeMrkdwn(truncateText(answers.trafficSources || 'N/A'))}`,
+            `*Landing Pages:* ${escapeMrkdwn(truncateText(answers.landingPages || 'N/A'))}`,
+            `*Massive Win:* ${escapeMrkdwn(truncateText(answers.massiveWin || 'N/A'))}`,
+            `*AI Skill Level:* ${escapeMrkdwn(String(answers.aiSkillLevel || 'N/A'))}`,
+            `*Bio:* ${escapeMrkdwn(truncateText(answers.bio || 'N/A'))}`,
+            `*Scheduled Call:* ${escapeMrkdwn(String(answers.scheduleCall || 'N/A'))}`,
+            `*WhatsApp Joined:* ${escapeMrkdwn(String(answers.whatsappJoined || (onboardingContext.bo_whatsapp_joined ? 'done' : 'N/A')))}`,
+            `*Team Members Added:* ${onboardingTeamMembers}`,
+            `*Partners Added:* ${onboardingPartners}`
+        ];
+
+        onboardingText = onboardingLines.join('\n');
+    }
+
+    return [
+        {
+            type: 'header',
+            text: {
+                type: 'plain_text',
+                text: `Member Lookup: ${typeformName}`
+            }
+        },
+        {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: `*Data Found:* ${sourceLabel}`
+            }
+        },
+        { type: 'divider' },
+        {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: `*📝 Typeform*\n${typeformLines.join('\n')}`
+            }
+        },
+        { type: 'divider' },
+        {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: `*💬 Onboarding Chat*\n${onboardingText}`
+            }
+        }
+    ];
+}
+
+async function handleMemberLookupDM(pool, channelId, rawText) {
+    const query = parseMemberLookupQuery(rawText);
+    if (!query) {
+        await postMessage(
+            channelId,
+            'Send a first name, full name, or email to look up a member.',
+            [{
+                type: 'section',
+                text: {
+                    type: 'mrkdwn',
+                    text: 'Send a member *first name*, *full name* (`First Last`), or *email* and I will return their Typeform data plus Onboarding Chat data when available.'
+                }
+            }]
+        );
+        return;
+    }
+
+    const matches = await findTypeformMatches(pool, query);
+    if (!matches.length) {
+        const queryText = query.type === 'email'
+            ? query.email
+            : [query.firstName, query.lastName].filter(Boolean).join(' ');
+        await postMessage(
+            channelId,
+            `No members found for "${queryText}".`,
+            [{
+                type: 'section',
+                text: {
+                    type: 'mrkdwn',
+                    text: `I couldn't find a Typeform member for *${escapeMrkdwn(queryText)}*. Try full name or email.`
+                }
+            }]
+        );
+        return;
+    }
+
+    if (matches.length > 1) {
+        await postMessage(
+            channelId,
+            `Multiple members found for ${describeLookupQuery(query)}.`,
+            buildAmbiguousLookupBlocks(matches, query)
+        );
+        return;
+    }
+
+    const typeformRow = matches[0];
+    const onboardingContext = typeformRow.email
+        ? await getLatestOnboardingContextByEmail(pool, typeformRow.email)
+        : null;
+
+    await postMessage(
+        channelId,
+        `Member lookup result for ${formatName(typeformRow.first_name, typeformRow.last_name)}`,
+        buildMemberLookupBlocks(typeformRow, onboardingContext)
+    );
+}
+
 // Verify Slack request signature
 function verifySlackSignature(req, res, next) {
     const signature = req.headers['x-slack-signature'];
@@ -1335,6 +1666,27 @@ router.post('/events', verifySlackSignature, async (req, res) => {
 
         // Acknowledge immediately
         res.status(200).send();
+
+        // Handle direct-message member lookup requests
+        if (payload.event?.type === 'message' &&
+            payload.event.channel_type === 'im' &&
+            !payload.event.bot_id &&
+            !payload.event.subtype) {
+            const event = payload.event;
+            const channelId = event.channel;
+
+            try {
+                await handleMemberLookupDM(pool, channelId, event.text || '');
+            } catch (lookupError) {
+                console.error('[Slack Events] DM lookup error:', lookupError);
+                try {
+                    await postMessage(channelId, 'Sorry, I hit an error while looking that up.');
+                } catch (postError) {
+                    console.error('[Slack Events] Failed to post DM lookup error message:', postError.message);
+                }
+            }
+            return;
+        }
 
         // Handle message events in threads
         console.log('[Slack Events] Received event:', payload.event?.type, 'subtype:', payload.event?.subtype);
