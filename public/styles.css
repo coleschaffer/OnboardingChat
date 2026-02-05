@@ -794,6 +794,8 @@ textarea.text-input {
 @media (max-width: 640px) {
     .container {
         padding: 60px 12px 12px 12px;
+        min-height: 100dvh;
+        height: 100dvh;
     }
 
     .header {
@@ -823,6 +825,11 @@ textarea.text-input {
 
     .chat-messages {
         padding: 12px 8px;
+        min-height: 0;
+    }
+
+    .chat-container {
+        min-height: 0;
     }
 
     .message {
