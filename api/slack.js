@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const slackBlocks = require('../lib/slack-blocks');
-const { openModal, postMessage, deleteMessage } = require('./slack-threads');
+const { openModal, postMessage, deleteMessage, postNoteToPurchaseThread } = require('./slack-threads');
 const { gmailService } = require('../lib/gmail');
 const { createApplicationNote, syncApplicationNoteToSlack } = require('../lib/notes');
 
@@ -351,9 +351,52 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
                 console.error('Error resolving application for add_application_note shortcut:', dbErr.message);
             }
 
-            const fallbackEmail = applicationEmail || extractEmailFromSlackMessage(message);
+            let fallbackEmail = applicationEmail || extractEmailFromSlackMessage(message);
 
-            const needsIdentifier = !applicationId;
+            if (!fallbackEmail && threadTs) {
+                try {
+                    const historyResponse = await fetch(`https://slack.com/api/conversations.replies?channel=${channelId}&ts=${threadTs}&limit=1`, {
+                        headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}` }
+                    });
+                    const historyData = await historyResponse.json();
+                    if (historyData.ok && Array.isArray(historyData.messages) && historyData.messages.length > 0) {
+                        fallbackEmail = extractEmailFromSlackMessage(historyData.messages[0]);
+                    }
+                } catch (fetchErr) {
+                    console.error('Error fetching thread root for add_application_note shortcut:', fetchErr.message);
+                }
+            }
+
+            if (!applicationId && fallbackEmail) {
+                try {
+                    const appResult = await pool.query(
+                        'SELECT id, email FROM typeform_applications WHERE LOWER(email) = LOWER($1) ORDER BY created_at DESC LIMIT 1',
+                        [fallbackEmail]
+                    );
+                    applicationId = appResult.rows[0]?.id || null;
+                    applicationEmail = appResult.rows[0]?.email || fallbackEmail;
+                } catch (dbErr) {
+                    console.error('Error resolving application by email for add_application_note shortcut:', dbErr.message);
+                }
+            }
+
+            if (!applicationId && !fallbackEmail) {
+                await openModal(triggerId, {
+                    type: 'modal',
+                    title: { type: 'plain_text', text: 'Add Note' },
+                    close: { type: 'plain_text', text: 'Close' },
+                    blocks: [
+                        {
+                            type: 'section',
+                            text: {
+                                type: 'mrkdwn',
+                                text: 'I couldn’t determine which application this thread belongs to. Try running this shortcut on the top application message, or use `/note email@example.com <text>`.'
+                            }
+                        }
+                    ]
+                });
+                return res.status(200).send();
+            }
 
             const view = {
                 type: 'modal',
@@ -368,30 +411,15 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
                     fallbackEmail: fallbackEmail || null
                 }),
                 blocks: [
-                    ...(needsIdentifier ? [
-                        {
-                            type: 'input',
-                            block_id: 'app_identifier_block',
-                            optional: true,
-                            label: { type: 'plain_text', text: 'Application Email (optional)' },
-                            element: {
-                                type: 'plain_text_input',
-                                action_id: 'app_identifier',
-                                initial_value: fallbackEmail || '',
-                                placeholder: { type: 'plain_text', text: 'email@example.com' }
+                    {
+                        type: 'context',
+                        elements: [
+                            {
+                                type: 'mrkdwn',
+                                text: `Adding a note for *${applicationEmail || fallbackEmail || 'this application'}*`
                             }
-                        }
-                    ] : [
-                        {
-                            type: 'context',
-                            elements: [
-                                {
-                                    type: 'mrkdwn',
-                                    text: `Adding a note for *${applicationEmail || 'this application'}*`
-                                }
-                            ]
-                        }
-                    ]),
+                        ]
+                    },
                     {
                         type: 'input',
                         block_id: 'note_text_block',
@@ -812,9 +840,8 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
                 }
             }
 
-            // Fallback: allow identifier/email if the thread is older / not linked in DB
-            const identifierFromModal = payload.view.state.values?.app_identifier_block?.app_identifier?.value?.trim() || '';
-            const identifier = identifierFromModal || privateMetadata.fallbackEmail || '';
+            // Fallback: resolve by email parsed from the thread (captured at modal-open time)
+            const identifier = privateMetadata.fallbackEmail || '';
 
             if (!applicationId && identifier) {
                 try {
@@ -840,7 +867,7 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
                 return res.json({
                     response_action: 'errors',
                     errors: {
-                        app_identifier_block: 'Could not determine which application this note is for. Try providing the application email.'
+                        note_text_block: 'Could not determine which application this note is for. Make sure you ran this shortcut in an application thread.'
                     }
                 });
             }
@@ -856,15 +883,39 @@ router.post('/interactions', verifySlackSignature, async (req, res) => {
             res.status(200).send();
 
             setImmediate(async () => {
-                const syncStatus = await syncApplicationNoteToSlack({
-                    pool,
-                    applicationId,
-                    applicationEmail,
-                    noteId: note.id,
-                    noteText: note.note_text,
-                    createdBy: note.created_by,
-                    createdAt: note.created_at
-                });
+                const syncStatus = {
+                    slack_application_synced: false,
+                    slack_application_message_ts: null,
+                    slack_purchase_synced: false,
+                    slack_purchase_message_ts: null
+                };
+
+                try {
+                    if (channelId && threadTs) {
+                        const noteBlock = slackBlocks.createNoteAddedBlock(note.note_text, note.created_by, note.created_at);
+                        const slackResponse = await postMessage(channelId, noteBlock.text, noteBlock.blocks, threadTs);
+                        if (slackResponse?.ts) {
+                            await pool.query(
+                                'UPDATE application_notes SET slack_synced = true, slack_message_ts = $1 WHERE id = $2',
+                                [slackResponse.ts, note.id]
+                            );
+                            syncStatus.slack_application_synced = true;
+                            syncStatus.slack_application_message_ts = slackResponse.ts;
+                        }
+                    }
+                } catch (slackError) {
+                    console.error('Failed to sync note to Slack application thread (shortcut):', slackError.message);
+                }
+
+                try {
+                    const purchaseResponse = await postNoteToPurchaseThread(pool, applicationEmail, note.note_text, note.created_by, note.created_at);
+                    if (purchaseResponse?.ts) {
+                        syncStatus.slack_purchase_synced = true;
+                        syncStatus.slack_purchase_message_ts = purchaseResponse.ts;
+                    }
+                } catch (slackError) {
+                    console.error('Failed to sync note to Slack purchase thread (shortcut):', slackError.message);
+                }
 
                 try {
                     await pool.query(

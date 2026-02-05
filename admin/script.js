@@ -2205,7 +2205,7 @@ function renderNotesSection(notes, applicationId) {
         ? notes.map(note => `
             <div class="note-item" data-note-id="${note.id}">
                 <div class="note-meta">
-                    <span class="note-author">${note.created_by}</span>
+                    <span class="note-author">${escapeHtml(note.created_by || '')}</span>
                     <span>${formatTimeAgo(note.created_at)} ${note.slack_synced ? '<span class="slack-synced">Synced to Slack</span>' : ''}</span>
                 </div>
                 <div class="note-text">${escapeHtml(note.note_text)}</div>
