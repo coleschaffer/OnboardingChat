@@ -1,106 +1,116 @@
-# Partial Onboarding + Resume Support
+# Partial Onboarding + Resume Behavior
 
-## Overview
+The public onboarding chat supports resume/recovery by storing progress both client-side and server-side.
 
-The onboarding chat supports **partial saves** so a member can refresh/leave and resume later. Progress is stored in:
+## Client-Side State
 
-- **Client**: `localStorage` (fast resume in the browser)
-- **Server**: `onboarding_submissions` (admin visibility + recovery)
+File: `public/script.js`
 
-## Client Behavior (Public Chat)
-
-Implemented in `public/script.js`:
-
-- **Storage key**: `ca_pro_onboarding` (in `localStorage`)
-- Stored data:
-  - `sessionId`, `currentQuestion`
+- Local storage key: `ca_pro_onboarding`
+- Stored fields:
+  - `sessionId`
+  - `currentQuestion`
   - `answers`
-  - `teamMembers`, `cLevelPartners`
+  - `teamMembers`
+  - `cLevelPartners`
   - `hasTeamMembers` (AI validation result)
   - `isComplete`
-- On load:
-  - If `isComplete` is true → shows the completion screen immediately
-  - Else if `currentQuestion > 0` → replays prior Q&A and resumes at the saved question
 
-### Team Step Skipping (AI + Fallback)
+Behavior on page load:
 
-After the user answers the **Team Count** question, the client calls:
+- If `isComplete=true`: show completion screen immediately
+- Else if `currentQuestion > 0`: replay prior Q/A and resume where user left off
+- Else: start fresh onboarding flow
 
-- `POST /api/validate-team-count`
+## Team Count Skip Logic
 
-If the response indicates *no* team members, the chat skips the `teamMembers` step.
+After answering the `teamCount` question:
 
-## Backend Behavior (Progress Saves)
+- client calls `POST /api/validate-team-count`
+- if response says no team members, `teamMembers` step is skipped
+- fallback heuristic is used if Anthropic is unavailable
 
-### `POST /api/onboarding/save-progress`
+## Server-Side Progress API
 
-The browser calls this after each answer. The request includes:
+Endpoint: `POST /api/onboarding/save-progress`
+
+Request includes:
 
 - `sessionId`
-- `answers` (plus `answers.lastQuestionId` for tracking)
-- `teamMembers`, `cLevelPartners`
-- `currentQuestion`, `totalQuestions`
+- `answers`
+- `teamMembers`
+- `cLevelPartners`
+- `currentQuestion`
+- `totalQuestions`
 - `isComplete`
 
-The server stores/updates a row in `onboarding_submissions` keyed by `session_id`:
+Server behavior:
 
-- `data` = `{ answers, teamMembers, cLevelPartners }`
-- `progress_percentage` = `round(currentQuestion / totalQuestions * 100)`
-- `last_question` = `answers.lastQuestionId`
-- `is_complete`, `completed_at`
+- Upsert into `onboarding_submissions` by `session_id`
+- Save data JSON: `{ answers, teamMembers, cLevelPartners }`
+- Update progress metadata:
+  - `progress_percentage`
+  - `last_question`
+  - `is_complete` / `completed_at`
 
-Additional side-effects during progress saves:
+## Side Effects During Progress Saves
 
-- On the **first** save where an email is present, the server sets `typeform_applications.onboarding_started_at` (email match).
-- When **new** team-member/partner emails appear (compared to the previous save), the server triggers best-effort async syncs:
-  - Circle (`api/circle.js`)
-  - ActiveCampaign (`api/activecampaign.js`)
+### Onboarding started timestamp
 
-### Completion Processing (Runs Once)
+When email appears for the first time in a session:
 
-When a submission becomes complete for the **first** time, the server additionally:
+- set `typeform_applications.onboarding_started_at`
+- write `activity_log` entry (`onboarding_started`)
 
-- Creates/updates `business_owners`
-- Inserts `team_members` and `c_level_partners`
-- Sets `onboarding_submissions.monday_sync_scheduled_at = NOW()` (for the cron-driven Monday sync)
-- Sets `typeform_applications.onboarding_completed_at` (if email matches)
-- Updates an existing SamCart welcome thread with onboarding data (if a thread exists)
+### New team/partner contact sync
 
-## Admin Dashboard Support
+For newly-added emails (diffed against previous save):
 
-The **Onboarding** tab in `/admin` uses:
+- sync to Circle (`api/circle.js`) async, best effort
+- sync to ActiveCampaign (`api/activecampaign.js`) async, best effort
+- log WhatsApp group-add summary into purchase thread when possible
 
-- `GET /api/onboarding/submissions` (filter by `complete=true|false`)
+## Completion Processing (One-Time)
+
+Completion executes only when transitioning from incomplete to complete.
+
+Actions:
+
+- create or update `business_owners`
+- insert `team_members`
+- insert `c_level_partners`
+- link submission row to `business_owner_id`
+- schedule Monday sync now (`monday_sync_scheduled_at = NOW()`)
+- attempt Monday Company field update via SamCart `monday_item_id`
+- update SamCart welcome thread with onboarding context
+- set `typeform_applications.onboarding_completed_at`
+- log onboarding completion activity
+
+## Admin Endpoints For Onboarding Data
+
+- `GET /api/onboarding/submissions`
 - `GET /api/onboarding/submissions/:id`
 - `GET /api/onboarding/session/:sessionId`
 - `POST /api/onboarding/submissions/:id/complete`
 - `DELETE /api/onboarding/submissions/:id`
+- `GET /api/onboarding/status`
 
-## Database Fields Involved
+## Database Fields Used
 
 ### `onboarding_submissions`
 
-- `session_id` (unique)
+- `session_id`
 - `data` (JSONB)
 - `progress_percentage`
 - `last_question`
-- `is_complete`, `completed_at`
-- `created_at`, `updated_at`
-- `monday_sync_scheduled_at`, `monday_synced`, `monday_synced_at`
+- `is_complete`
+- `completed_at`
+- `monday_sync_scheduled_at`
+- `monday_synced`
+- `monday_synced_at`
 
-### `business_owners` (progress metadata)
+### `business_owners`
 
 - `onboarding_status`
 - `onboarding_progress`
 - `last_question_answered`
-
-## Migration Notes
-
-- `db/migrations/001-add-partial-onboarding.sql` adds the original partial-onboarding columns/indexes.
-
-## Testing Checklist
-
-1. Start onboarding, answer a few questions.
-2. Refresh: confirm the chat resumes.
-3. Confirm `onboarding_submissions` updates the same `session_id`.
-4. Complete onboarding: confirm `is_complete=true` and downstream processing runs once.

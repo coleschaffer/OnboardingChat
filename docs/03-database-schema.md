@@ -1,230 +1,219 @@
-# Database Schema & Migrations
+# Database Schema + Migration Model
 
-This project uses PostgreSQL directly via `pg` (no ORM). The schema is created from a mix of:
+This project uses PostgreSQL with no ORM. Schema comes from three sources:
 
-1. **Base schema**: `db/schema.sql` (tables + indexes + triggers)
-2. **Runtime migrations**: `server.js` `runMigrations()` (creates/updates additional tables/columns on startup)
-3. **Manual SQL migrations**: `db/migrations/*.sql` (apply with `psql` as needed)
+1. `db/schema.sql`
+2. SQL files in `db/migrations/*.sql`
+3. runtime migration logic in `server.js` (`runMigrations()`)
 
-Because there is no migration runner/ledger, **your database must be kept in sync manually**. The setup guide (`docs/00-setup-guide.md`) lists the migrations that are required for currently-running code.
+Because there is no migration ledger table, keep environments in sync manually.
 
 ## Required Extensions
-
-This codebase uses **two** UUID generation functions:
-
-- `uuid_generate_v4()` → requires extension `uuid-ossp` (enabled in `db/schema.sql`)
-- `gen_random_uuid()` → requires extension `pgcrypto` (enabled in `db/schema.sql`; enable manually if your DB user cannot create extensions)
-
-Run:
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 ```
 
-## Tables (By Domain)
+Both are required because code uses `uuid_generate_v4()` and `gen_random_uuid()`.
 
-### Core Member Records
+## Table Inventory
 
-#### `business_owners`
+## Member/Core Tables
 
-Primary record created/updated when OnboardingChat completes (or imported from CSV / converted from Typeform).
+### `business_owners`
 
-Key columns:
+Primary normalized member row.
 
-- Identity: `id` (UUID PK), `email` (unique), `first_name`, `last_name`, `phone`
-- Business: `business_name`, `business_overview`, `annual_revenue`, `team_count`
-- Onboarding metadata: `source`, `onboarding_status`, `onboarding_progress`, `last_question_answered`
-- Profile details: `bio`, `headshot_url`, `whatsapp_number`, `whatsapp_joined`, `whatsapp_joined_at`, `mailing_address` (JSONB), `apparel_sizes` (JSONB), `anything_else`
-- Timestamps: `created_at`, `updated_at` (trigger updates `updated_at`)
+Key fields:
 
-#### `team_members`
+- identity: `id`, `first_name`, `last_name`, `email` (unique), `phone`
+- business profile: `business_name`, `business_overview`, `annual_revenue`, `team_count`, `traffic_sources`, `landing_pages`, `pain_point`, `massive_win`
+- onboarding metadata: `source`, `onboarding_status`, `onboarding_progress`, `last_question_answered`
+- personal/profile: `bio`, `headshot_url`, `whatsapp_number`, `whatsapp_joined`, `whatsapp_joined_at`, `mailing_address`, `apparel_sizes`, `anything_else`
+- timestamps: `created_at`, `updated_at`
 
-Team members inserted during onboarding completion and/or CSV imports.
+### `team_members`
 
-Key columns:
+Team members linked to `business_owners` (`business_owner_id`).
 
-- `business_owner_id` → `business_owners.id` (nullable; `ON DELETE SET NULL`)
-- Contact: `first_name`, `last_name`, `email`, `phone`
-- Role/skills: `role`, `title`, `copywriting_skill`, `cro_skill`, `ai_skill`
-- Context: `business_summary`, `responsibilities`
-- `source`, `created_at`
+### `c_level_partners`
 
-#### `c_level_partners`
+Partner/executive contacts linked to `business_owners`.
 
-Partners/executives captured during onboarding completion.
+## Onboarding Session Tables
 
-Key columns:
+### `onboarding_submissions`
 
-- `business_owner_id` → `business_owners.id` (`ON DELETE CASCADE`)
-- Contact: `first_name`, `last_name`, `email`, `phone`
-- `source`, `created_at`
+One row per browser session (`session_id`).
 
-### Onboarding Sessions (Partial Saves)
+Key fields:
 
-#### `onboarding_submissions`
-
-One row per browser session (`session_id`) capturing partial progress and full responses.
-
-Key columns:
-
-- `session_id` (unique): generated client-side and persisted in `localStorage`
-- `data` (JSONB): `{ answers, teamMembers, cLevelPartners }`
-- Progress: `progress_percentage`, `last_question`, `is_complete`, `completed_at`
-- Member link: `business_owner_id` → `business_owners.id` (nullable)
-- Monday sync tracking:
-  - `monday_sync_scheduled_at`
-  - `monday_synced`
-  - `monday_synced_at`
-- Timestamps: `created_at`, `updated_at` (trigger updates `updated_at`)
-
-### Application Pipeline (Typeform → Email → Call → Purchase → Onboarding)
-
-#### `typeform_applications`
-
-Application intake record created by the Typeform webhook.
-
-Base columns (from `db/schema.sql`):
-
-- Identity: `id` (UUID PK), `typeform_response_id` (unique)
-- Applicant: `first_name`, `last_name`, `email`, `phone`
-- Q5–Q15 (stored individually): `contact_preference`, `business_description`, `annual_revenue`, `revenue_trend`, `main_challenge`, `why_ca_pro`, `investment_readiness`, `decision_timeline`, `has_team`, `referral_source`
-- `additional_info` (legacy/freeform)
-- `status` (`new|reviewed|approved|rejected`)
-- `raw_data` (JSONB), `created_at`
-
-Additional columns used by the current system (from runtime/migrations):
-
-- Q14: `anything_else` (preferred by code; code falls back to `additional_info` for older rows)
-- Slack threading:
-  - `slack_channel_id`
-  - `slack_thread_ts`
-- Status timestamps:
-  - `emailed_at` (automated email sent)
-  - `replied_at` (reply received)
-  - `call_booked_at` (Calendly booking)
-  - `purchased_at` (SamCart purchase matched by email)
-  - `onboarding_started_at` (first onboarding save with email)
-  - `onboarding_completed_at` (onboarding completion)
-  - `whatsapp_joined_at` (member joined WhatsApp group via Wasender webhook; final status)
-
-Notes:
-
-- `has_team` starts as a boolean in `db/schema.sql`; runtime migration converts it to `VARCHAR(255)` to store choice text like `"Yes"`/`"No"`.
-
-#### `email_threads`
-
-Tracks outbound Gmail threads for Typeform applicants and stores reply metadata.
-
-Key columns:
-
-- Linking:
-  - `typeform_application_id` → `typeform_applications.id`
-  - `gmail_thread_id` (unique), `gmail_message_id` (the first outbound message)
-- Recipient: `recipient_email`, `recipient_first_name`
-- Message: `subject`, `initial_email_sent_at`
-- Reply tracking: `has_reply`, `reply_received_at`, `reply_count`, `last_reply_snippet`, `last_reply_body`
-- `status` (string), `created_at`
-
-Used by:
-
-- `POST /api/jobs/process-email-replies` (poll + update + Slack notification)
-
-#### `pending_email_sends`
-
-Queue of reply emails created from Slack (“Send Reply” modal) with a short undo window.
-
-Key columns:
-
-- Linking:
-  - `typeform_application_id` → `typeform_applications.id`
-  - `gmail_thread_id` (thread to reply into)
-  - Slack pointers: `channel_id`, `thread_ts`
-- Payload: `to_email`, `subject`, `body`
-- Scheduling: `send_at`
-- Status: `status` (`pending|cancelled|sent|failed`), `cancelled_at`, `sent_at`, `error_message`
-- Slack UX: `sending_message_ts` (timestamp of the “Sending…” Slack message to delete on undo)
-
-Used by:
-
-- Slack interaction handler (`POST /api/slack/interactions`)
-- Cron endpoint `POST /api/jobs/process-pending-emails`
-
-#### `application_notes`
-
-Internal notes on Typeform applications. Notes can be synced into the application’s Slack thread.
-
-Key columns:
-
-- `application_id` → `typeform_applications.id` (`ON DELETE CASCADE`)
-- `note_text`, `created_by`
-- Slack sync: `slack_synced`, `slack_message_ts`
-- `created_at`
-
-#### `calendly_webhook_subscriptions`
-
-Stores Calendly webhook subscription metadata and the signing key used for signature verification.
-
-Key columns:
-
-- `webhook_uri`, `signing_key`
-- `organization_uri`, `scope`, `state`
+- `data` JSONB (`answers`, `teamMembers`, `cLevelPartners`)
+- `progress_percentage`, `last_question`, `is_complete`, `completed_at`
+- `business_owner_id`
+- Monday sync fields: `monday_sync_scheduled_at`, `monday_synced`, `monday_synced_at`
 - `created_at`, `updated_at`
 
-### Purchases + Welcome Threads
+## Typeform + Application Pipeline Tables
 
-#### `samcart_orders`
+### `typeform_applications`
 
-Stores SamCart webhook payloads and Slack/Monday metadata for onboarding.
+Application intake + pipeline status timestamps.
 
-Base columns (created by runtime migration / `db/migrations/003-add-samcart-orders.sql`):
+Important fields:
 
-- Identity: `id` (UUID PK), `samcart_order_id` (unique), `event_type`
-- Customer: `email`, `first_name`, `last_name`, `phone`
-- Product: `product_name`, `product_id`, `order_total`, `currency`, `status`
-- `raw_data` (JSONB), `created_at`, `updated_at`
+- source identity: `typeform_response_id`, `raw_data`
+- answer columns: `contact_preference`, `business_description`, `annual_revenue`, `revenue_trend`, `main_challenge`, `why_ca_pro`, `investment_readiness`, `decision_timeline`, `has_team`, `anything_else`/legacy `additional_info`, `referral_source`
+- review status: `status` (`new|reviewed|approved|rejected`)
+- slack thread pointers: `slack_channel_id`, `slack_thread_ts`
+- timeline fields:
+  - `emailed_at`
+  - `replied_at`
+  - `call_booked_at`
+  - `purchased_at`
+  - `onboarding_started_at`
+  - `onboarding_completed_at`
+  - `whatsapp_joined_at`
 
-Additional columns used by the current system:
+### `email_threads`
 
-- Welcome flow:
-  - `welcome_sent` (boolean)
-  - `welcome_sent_at`
-- Slack threading + message pointers:
-  - `slack_channel_id`, `slack_thread_ts` (purchase notification thread)
-  - `welcome_note_message_ts` (the “Onboarding not complete” note)
-  - `welcome_message_ts` (the generated welcome message)
-  - `typeform_message_ts` (the Typeform summary message in the thread)
-- Monday:
-  - `monday_item_id`
-  - `monday_created_at`
+Tracks Gmail threads for both Typeform and renewal contexts.
 
-### Admin / Ops Tables
+Key fields:
 
-#### `activity_log`
+- `gmail_thread_id`, `gmail_message_id`
+- `typeform_application_id` (nullable for non-Typeform contexts)
+- `context_type`, `context_id`
+- `slack_channel_id`, `slack_thread_ts`
+- reply state: `has_reply`, `reply_received_at`, `reply_count`, `last_reply_snippet`, `last_reply_body`, `status`
 
-Lightweight audit/event log used by the admin dashboard.
+### `pending_email_sends`
 
-- `action`, `entity_type`, `entity_id`, `details` (JSONB), `created_at`
+Queued outbound replies with undo support.
 
-#### `import_history`
+Key fields:
 
-Tracks CSV imports via the admin UI and CLI.
+- recipient/payload: `to_email`, `subject`, `body`
+- linking: `gmail_thread_id`, `typeform_application_id`, `context_type`, `context_id`
+- Slack UX pointers: `channel_id`, `thread_ts`, `sending_message_ts`
+- queue state: `send_at`, `status`, `cancelled_at`, `sent_at`, `error_message`
 
-- `filename`, `import_type`, `records_imported`, `records_failed`, `errors` (JSONB), `imported_by`, `created_at`
+### `application_notes`
 
-## Schema Application Order (Recommended)
+Internal notes for applications with optional Slack sync pointers.
 
-For a fresh database:
+### `calendly_webhook_subscriptions`
 
-1. Enable extensions (`uuid-ossp`, `pgcrypto`)
-2. Apply `db/schema.sql`
-3. Apply required migrations under `db/migrations/` (at minimum `009`, `010`, `011`)
-4. Start the server once so `server.js` runtime migrations can create missing tables/columns
+Stores Calendly webhook metadata and signing key for request verification.
 
-For existing databases, apply migrations as needed and restart the server.
+## SamCart + Billing/Offboarding Tables
 
-### Migration note: WhatsApp join tracking
+### `samcart_orders`
 
-If you have an existing database and want to add WhatsApp join tracking via SQL, apply:
+SamCart order records + Slack/Monday metadata.
 
-- `db/migrations/012_whatsapp_joined_at.sql` (adds `whatsapp_joined_at` to `typeform_applications` and `business_owners`)
+Key fields:
+
+- order payload: `samcart_order_id`, `event_type`, customer fields, product fields, `status`, `raw_data`
+- welcome flow: `welcome_sent`, `welcome_sent_at`
+- Slack purchase thread pointers:
+  - `slack_channel_id`, `slack_thread_ts`
+  - `welcome_note_message_ts`
+  - `welcome_message_ts`
+  - `typeform_message_ts`
+- Monday mapping: `monday_item_id`, `monday_created_at`
+
+### `samcart_subscription_events`
+
+Deduplicated subscription lifecycle events.
+
+Key fields:
+
+- `event_key` (unique)
+- normalized `event_type` (`charge_failed`, `charged`, `recovered`, `delinquent`, `canceled`, etc.)
+- `email`, `period_key`, `subscription_id`, `order_id`
+- `amount`, `currency`, `status`, `occurred_at`, `raw_data`
+
+Used by offboarding logic and monthly bounce attempt tracking.
+
+### `member_threads`
+
+Slack thread registry for non-application contexts.
+
+Key fields:
+
+- `member_email`, `member_name`
+- `thread_type` (`monthly_bounce`, `yearly_renewal`, `cancel`, etc.)
+- `period_key`
+- `slack_channel_id`, `slack_thread_ts`
+- `metadata` JSONB (e.g., offboarding flags, recovery timestamps)
+
+Unique index:
+
+- `(member_email, thread_type, period_key)`
+
+### `cancellations`
+
+Cancellation records and reason tracking.
+
+Key fields:
+
+- `member_email`, `member_name`
+- `reason`, `source`, `created_by`
+- `slack_channel_id`, `slack_thread_ts`
+- `member_thread_id`
+
+## Admin/Ops Tables
+
+### `activity_log`
+
+Generic event log for dashboard and operational audit trail.
+
+### `import_history`
+
+Tracks CSV imports via admin UI or CLI scripts.
+
+## Runtime Migrations In `server.js`
+
+Startup logic in `runMigrations()` can create/alter:
+
+- `samcart_orders`
+- `email_threads`
+- `pending_email_sends`
+- `member_threads`
+- `samcart_subscription_events`
+- `cancellations`
+- `application_notes`
+- `calendly_webhook_subscriptions`
+- multiple status/threading columns on `typeform_applications`
+- `whatsapp_joined_at` on `business_owners`
+
+This means startup behavior can mutate schema even when SQL migrations are not run.
+
+## SQL Migrations Reference
+
+- `001-add-partial-onboarding.sql`: partial onboarding support fields
+- `002-expand-column-lengths.sql`: wider text/varchar fields
+- `003-add-samcart-orders.sql`: base SamCart table
+- `003-expand-typeform-fields.sql`: Typeform question column expansion + `has_team` type conversion
+- `005_monday_sync.sql`: Monday sync scheduling fields
+- `007_email_threads.sql`: email threads, notes, calendly subscription storage, status timestamps
+- `008_samcart_slack_thread.sql`: SamCart Slack thread columns
+- `009_monday_business_owner.sql`: `monday_item_id` tracking on orders
+- `010_purchased_at.sql`: `typeform_applications.purchased_at`
+- `011_sending_message_ts.sql`: pending email sending-message pointer
+- `012_whatsapp_joined_at.sql`: WhatsApp joined timestamps
+
+## Recommended Fresh Environment Order
+
+1. create extensions
+2. apply `db/schema.sql`
+3. apply SQL migrations (see setup guide)
+4. boot app once to run runtime migrations
+
+## Drift Risks To Watch
+
+- `typeform_applications.has_team` boolean-vs-text differences on old DBs
+- columns expected by admin/pipeline views (`purchased_at`, `monday_item_id`, `sending_message_ts`)
+- coexistence of legacy `additional_info` and newer `anything_else`

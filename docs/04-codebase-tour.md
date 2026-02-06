@@ -1,140 +1,144 @@
-# Codebase Tour (File-by-File)
+# Codebase Tour
 
-This document is a practical map of the repository: what lives where, and where to look when changing/diagnosing behavior.
+Practical map of where behavior lives.
 
-## Top-Level Entry Points
+## Root Entrypoints
 
 ### `server.js`
 
-- Express app setup + middleware
-  - CORS
-  - raw-body capture for Slack signature verification (`/api/slack/*`)
-  - raw-body capture for Calendly signature verification (`/api/webhooks/calendly`)
-- Postgres `pg` pool creation (`DATABASE_URL`)
-- Route mounting
-- Static hosting:
-  - `/admin` → `admin/`
-  - `/` → `public/`
-- Runtime DB migrations: `runMigrations()` (creates/updates several tables/columns on startup)
-- Calendly webhook initialization: `lib/calendly.js#initializeWebhook()`
+- Express app boot
+- pg Pool initialization (`DATABASE_URL`)
+- raw-body middleware for Slack + Calendly signature verification
+- route mounting for all `/api/*` modules
+- static serving:
+  - `/admin` -> `admin/`
+  - `/` -> `public/`
+- runtime schema migration pass (`runMigrations()`)
+- Calendly webhook initialization (`lib/calendly.js`)
 
 ### `cron-worker.js`
 
-Designed for Railway Cron. Calls job endpoints on the deployed server:
+Railway cron worker script. Calls:
 
-- `POST /api/jobs/process-delayed-welcomes` (deprecated no-op)
-- `POST /api/jobs/process-monday-syncs`
-- `POST /api/jobs/process-email-replies`
-- `POST /api/jobs/process-pending-emails`
+- `/api/jobs/process-delayed-welcomes` (deprecated)
+- `/api/jobs/process-monday-syncs`
+- `/api/jobs/process-email-replies`
+- `/api/jobs/process-yearly-renewals`
+- `/api/jobs/process-pending-emails`
 
-Auth is via `x-cron-secret: CRON_SECRET`.
+Uses `x-cron-secret` header.
 
 ## API Routers (`api/`)
 
-### Webhooks + pipeline triggers
+### Pipeline/webhooks
 
 - `api/webhooks.js`
-  - `POST /api/webhooks/typeform`: Typeform intake → insert `typeform_applications` → async Slack+Gmail flow
-  - `POST /api/webhooks/samcart`: SamCart purchase → insert `samcart_orders` → Slack purchase thread + welcome thread + Monday Business Owner creation
+  - Typeform webhook
+  - SamCart order + subscription event webhook
+  - welcome thread trigger + WhatsApp add logging
+  - offboarding actions for delinquent/canceled members
 - `api/calendly.js`
-  - `POST /api/webhooks/calendly`: Calendly invitee.created → sets `call_booked_at` → posts Slack call-booked block
+  - Calendly webhook (`invitee.created`)
 - `api/wasender.js`
-  - `POST /api/webhooks/wasender`: WhatsApp group join events → sets `typeform_applications.whatsapp_joined_at` → posts Slack update in the purchase/welcome thread
-
-### Onboarding
-
-- `api/onboarding.js`
-  - `POST /api/onboarding/save-progress`: upserts partial progress + triggers contact sync + processes completion (once)
-  - Admin support endpoints: list/fetch/complete/delete submissions, fetch by session ID, status summary
+  - WhatsApp join webhook handling
 
 ### Slack
 
 - `api/slack.js`
-  - Slack request signature verification (requires `SLACK_SIGNING_SECRET`)
-  - `POST /api/slack/interactions`:
-    - copy/open modal actions
-    - “Send Reply” flow → inserts `pending_email_sends` + undo message
-  - `POST /api/slack/events`:
-    - thread replies used to request welcome-message edits
-  - `POST /api/slack/commands`:
-    - Slack slash commands (currently `/note` for application notes)
-  - `POST /api/slack/send-welcome`: manual DM-based welcome message send (not the primary production flow)
-  - `GET /api/slack/users`: user list for the admin UI (if used)
+  - Slack signature verification middleware
+  - interactions (modals, shortcuts, undo/send workflow)
+  - commands (`/note`)
+  - events (DM member lookup + thread welcome edits)
+  - helper endpoints (`send-welcome`, `users`)
 - `api/slack-threads.js`
-  - Low-level Slack Web API helpers (`postMessage`, `updateMessage`, `deleteMessage`, `openModal`)
-  - Application thread posting helpers:
-    - `postApplicationNotification`
-    - `postReplyNotification`
-    - `postCallBookedNotification`
-    - `postNoteToThread`
-    - `postNoteToPurchaseThread` (mirrors notes into the purchase/welcome thread when available)
-  - Purchase thread updater:
-    - `postOnboardingUpdateToWelcomeThread`
+  - Slack Web API wrappers (`post/update/delete/open modal`)
+  - application/purchase thread helper functions
+  - welcome update and note mirroring helpers
 
-### Scheduled jobs
+### Onboarding
+
+- `api/onboarding.js`
+  - progress saves and completion processing
+  - business owner/team/partner creation
+  - incremental Circle/ActiveCampaign sync hooks
+  - onboarding admin endpoints
+
+### Jobs/cron
 
 - `api/jobs.js`
-  - `sendWelcomeThread()` (used by SamCart webhook; posts threaded welcome content)
-  - Cron endpoints:
-    - `/process-delayed-welcomes` (deprecated no-op)
-    - `/process-monday-syncs`
-    - `/process-email-replies`
-    - `/process-pending-emails`
-  - Utility admin/test endpoints:
-    - `/reset-monday-sync`
-    - `/reset-typeform-test`
-    - `/process-monday-business-owners`
-    - `/trigger-email-flow` (currently references a missing module; not functional)
+  - Monday sync job
+  - yearly renewal notices job
+  - email reply processing job
+  - pending send processing job
+  - reset/test endpoints
+  - exports `sendWelcomeThread()` and `generateWelcomeMessage()`
 
-### Admin CRUD APIs
+### Admin CRUD/data endpoints
 
-- `api/applications.js`: Typeform application list/detail/status updates/conversion/deletion
-- `api/notes.js`: CRUD notes on an application + optional Slack sync
-- `api/members.js`: business owner list/detail/unified view/update/delete
-- `api/team-members.js`: team members list/detail/create/update/delete
-- `api/import.js`: CSV import endpoints + import history
-- `api/stats.js`: dashboard metrics + activity feed
-- `api/validate.js`: Claude-powered team-count validation (fallback heuristic if not configured)
+- `api/applications.js`
+- `api/members.js`
+- `api/team-members.js`
+- `api/notes.js`
+- `api/cancellations.js`
+- `api/import.js`
+- `api/stats.js`
+- `api/validate.js`
 
-### Integrations (non-router modules)
+### Integrations
 
-- `api/monday.js`: Monday.com GraphQL integration (board IDs and column IDs are partially hardcoded)
-- `api/circle.js`: Circle admin API integration (has env var tokens with hardcoded fallbacks)
-- `api/activecampaign.js`: ActiveCampaign contact/tag/list sync
+- `api/monday.js` (board sync, BO/team/partner operations)
+- `api/circle.js` (member invite/access-group + removals)
+- `api/activecampaign.js` (contact/tag/list sync)
 
 ## Libraries (`lib/`)
 
-- `lib/gmail.js`: Gmail OAuth token refresh + send email + thread polling + reply parsing helpers
-- `lib/calendly.js`: Calendly API client for webhook subscription creation + signature verification
-- `lib/slack-blocks.js`: Slack Block Kit templates (WhatsApp template, email blocks, modals, etc.)
-- `lib/notes.js`: shared helpers for creating application notes and syncing them into Slack threads
-- `lib/typeform.js`: Typeform API client + optional DB sync helper (not part of the webhook path)
+- `lib/gmail.js`: OAuth refresh, send email, poll thread replies
+- `lib/slack-blocks.js`: reusable Block Kit payload builders
+- `lib/calendly.js`: Calendly API + webhook signing verification
+- `lib/notes.js`: note create/sync shared logic
+- `lib/typeform.js`: optional Typeform API sync client
+- `lib/time.js`: ET date-key/time helpers
+- `lib/billing-utils.js`: money parsing/formatting + renewal copy helpers
+- `lib/member-threads.js`: create/find/update member thread records
+- `lib/wasender-client.js`: add/remove participants in WhatsApp groups
+- `lib/whatsapp-actions.js`: batch add helper + summary formatter
+- `lib/whatsapp-groups.js`: configured group-key mappings
 
 ## Frontend
 
 ### Public onboarding chat (`public/`)
 
-- `public/index.html`: chat UI shell
-- `public/script.js`: question flow, localStorage persistence, calls:
-  - `POST /api/onboarding/save-progress`
-  - `POST /api/validate-team-count`
-- `public/copy.html`: helper page used by Slack copy-link buttons (copies query param `text` to clipboard)
+- `public/index.html`: chat shell
+- `public/script.js`: question flow, local resume, backend progress save
+- `public/styles.css`: chat styles
+- `public/copy.html`: copy-to-clipboard helper page for Slack buttons
 
 ### Admin dashboard (`admin/`)
 
-- `admin/index.html`: dashboard UI
-- `admin/script.js`: client-side password gate + calls admin APIs
-  - Security note: password is hardcoded and stored in sessionStorage; treat this as unprotected without external auth.
-  - Monday-style “board” UX (tables) implemented client-side:
-    - Grouped rows (collapsible headers) for Applications / Members / Team Members
-    - Sortable columns (state persisted in `localStorage`)
-    - Resizable columns (state persisted in `localStorage`)
-    - Right-side item view panel (replaces modals): `openItemPanel()`; legacy `openModal()` routes into the panel
-- `admin/styles.css`: dashboard styles (palette + board/panel UI)
+- `admin/index.html`: dashboard structure/tabs
+- `admin/script.js`: client-side auth gate + API-driven views
+- `admin/styles.css`: dashboard visuals, tables, panel layout
 
-## Database (`db/`)
+Notable admin behavior:
+
+- hardcoded password gate (`ADMIN_PASSWORD = '2323'`)
+- kanban pipeline with drag/drop stage updates
+- detail side panel replacing old modal pattern
+- built-in test triggers for subscription flows and yearly renewals
+
+## Database and Scripts (`db/`)
 
 - `db/schema.sql`: base schema
-- `db/migrations/*.sql`: manual migrations (no migration runner)
-- `db/run-schema.js`: helper to apply `schema.sql` against `DATABASE_URL`
-- `db/import.js`: CLI CSV import script (also exposed via admin upload endpoints)
+- `db/migrations/*.sql`: manual migration scripts
+- `db/import.js`: CSV CLI import tool
+- `db/run-schema.js`: schema bootstrap helper
+
+## Where To Change Common Behaviors
+
+- Typeform parsing or post-submit automation: `api/webhooks.js`
+- Slack thread block layout: `lib/slack-blocks.js`
+- Welcome generation prompt/model: `api/jobs.js` and `api/slack.js`
+- Onboarding question flow: `public/script.js`
+- Pipeline stage logic in admin: `api/applications.js` + `admin/script.js`
+- Monday board/column mappings: `api/monday.js`
+- Offboarding actions: `api/webhooks.js` + `api/circle.js` + `lib/wasender-client.js`

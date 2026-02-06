@@ -1,18 +1,22 @@
 # Setup Guide (Local + Production)
 
-This guide walks through setting up the CA Pro OnboardingChat system locally and in production (Railway).
+This guide covers local setup and production deployment assumptions for the current codebase.
 
 ## Prerequisites
 
 - Node.js `>= 18`
-- PostgreSQL database
-- (Recommended) Slack App (bot token + signing secret)
-- (Recommended) Gmail API credentials (OAuth refresh token) for automated email + reply workflow
-- (Optional) Calendly API token for automatic webhook subscription creation
-- (Optional) Monday.com API token for Business Owner + team/partner sync
-- (Optional) Circle + ActiveCampaign credentials for contact sync
+- PostgreSQL
+- Slack app (recommended)
+- Gmail API OAuth credentials (recommended)
+- Optional integrations:
+  - Anthropic
+  - Calendly
+  - Monday.com
+  - Circle.so
+  - ActiveCampaign
+  - Wasender
 
-## 1) Install Dependencies
+## 1) Install
 
 ```bash
 npm install
@@ -20,7 +24,7 @@ npm install
 
 ## 2) Environment Variables
 
-Create `.env` (or set variables in Railway):
+Create `.env` from `.env.example` and fill values.
 
 ### Core
 
@@ -28,54 +32,22 @@ Create `.env` (or set variables in Railway):
 DATABASE_URL=postgresql://user:password@host:port/database
 NODE_ENV=development
 PORT=3000
-
-# Strongly recommended (production URL). Used for:
-# - Calendly webhook callback URL creation
-# - cron-worker calls
-# - Slack copy links (/copy.html)
-BASE_URL=https://your-domain.com
+BASE_URL=https://your-domain.example
+CRON_SECRET=change-me
 ```
 
-### Slack (recommended)
+### Slack
 
 ```env
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_SIGNING_SECRET=...
-
-# Channel IDs (not names)
 CA_PRO_APPLICATION_SLACK_CHANNEL_ID=C0123456789
 CA_PRO_NOTIFICATIONS_SLACK_CHANNEL=C0123456789
-
-# Optional: used for tagging in Slack blocks
 STEF_SLACK_MEMBER_ID=U0123456789
-
-# Optional: only used by POST /api/slack/send-welcome (DM workflow)
 SLACK_WELCOME_USER_ID=U0123456789
 ```
 
-### Wasender (WhatsApp) (optional)
-
-```env
-# If set, the webhook requires x-wasender-secret (or ?secret=) to match.
-WASENDER_WEBHOOK_SECRET=some-long-random-secret
-
-# Optional but recommended: only process join events for these WhatsApp group JIDs.
-# Comma-separated. Example:
-WASENDER_ALLOWED_GROUP_JIDS=120363261244407125@g.us,120363276808270172@g.us
-```
-
-### Typeform
-
-```env
-# Optional: verifies typeform-signature header on incoming webhooks
-TYPEFORM_WEBHOOK_SECRET=...
-
-# Optional: only used by lib/typeform.js (not required for webhook ingestion)
-TYPEFORM_TOKEN=...
-TYPEFORM_FORM_ID=...
-```
-
-### Gmail (automated outbound email + reply tracking)
+### Gmail
 
 ```env
 STEF_GOOGLE_CLIENT_ID=...
@@ -83,194 +55,247 @@ STEF_GOOGLE_CLIENT_SECRET=...
 STEF_GOOGLE_REFRESH_TOKEN=...
 ```
 
-### Calendly (optional but recommended)
+### Anthropic
+
+```env
+ANTHROPIC_API_KEY=...
+```
+
+Used by:
+
+- welcome generation (`api/jobs.js`, `api/onboarding.js`, `api/slack.js`)
+- welcome edit requests in Slack thread replies
+- `POST /api/validate-team-count`
+
+### Typeform
+
+```env
+TYPEFORM_WEBHOOK_SECRET=...
+TYPEFORM_TOKEN=...
+TYPEFORM_FORM_ID=...
+```
+
+Notes:
+
+- Webhook intake only requires `TYPEFORM_WEBHOOK_SECRET` (optional verification).
+- `TYPEFORM_TOKEN` + `TYPEFORM_FORM_ID` are only for `lib/typeform.js` sync tooling.
+
+### Calendly
 
 ```env
 STEF_CALENDLY_TOKEN=...
 ```
 
-### Monday.com (optional)
+If set, server startup attempts to create/reuse webhook subscription at:
+
+- `${BASE_URL}/api/webhooks/calendly`
+
+### Monday.com
 
 ```env
 MONDAY_API_TOKEN=...
 ```
 
-### Circle + ActiveCampaign (optional)
+### Circle.so
 
 ```env
 CIRCLE_TOKEN_CA=...
 CIRCLE_TOKEN_SPG=...
+```
 
+### ActiveCampaign
+
+```env
 ACTIVECAMPAIGN_API_KEY=...
 ACTIVECAMPAIGN_URI=https://your-account.api-us1.com
 ```
 
-### Cron Jobs
+### Wasender / WhatsApp
 
 ```env
-CRON_SECRET=some-long-random-secret
+WASENDER_WEBHOOK_SECRET=...
+WASENDER_ALLOWED_GROUP_JIDS=120363261244407125@g.us,120363276808270172@g.us
+WASENDER_API_TOKEN=...
+WASENDER_API_BASE_URL=https://www.wasenderapi.com/api
+
+# Group IDs used for add/remove actions
+JID_AI=120363370304584165@g.us
+JID_TM=120363276808270172@g.us
+JID_BO=120363261244407125@g.us
 ```
+
+### Optional Timezone Override
+
+```env
+DEFAULT_TIMEZONE=America/New_York
+```
+
+Used by Slack note timestamp formatting; most billing/renewal logic uses `America/New_York` in code.
 
 ## 3) Database Setup
 
-### 3.1 Enable required extensions
-
-This codebase uses **both** `uuid_generate_v4()` and `gen_random_uuid()` across tables, so enable:
+### 3.1 Enable extensions
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 ```
 
-### 3.2 Apply the base schema
+### 3.2 Apply base schema
 
 ```bash
 psql "$DATABASE_URL" -f db/schema.sql
 ```
 
-### 3.3 Apply required migrations (recommended)
+### 3.3 Apply SQL migrations
 
-Some columns used by the running code are not guaranteed to be created by `server.js` runtime migrations.
-
-Run these (idempotent) migrations:
+Recommended for current behavior:
 
 ```bash
+psql "$DATABASE_URL" -f db/migrations/003-add-samcart-orders.sql
+psql "$DATABASE_URL" -f db/migrations/003-expand-typeform-fields.sql
+psql "$DATABASE_URL" -f db/migrations/005_monday_sync.sql
+psql "$DATABASE_URL" -f db/migrations/007_email_threads.sql
+psql "$DATABASE_URL" -f db/migrations/008_samcart_slack_thread.sql
 psql "$DATABASE_URL" -f db/migrations/009_monday_business_owner.sql
 psql "$DATABASE_URL" -f db/migrations/010_purchased_at.sql
 psql "$DATABASE_URL" -f db/migrations/011_sending_message_ts.sql
-```
-
-Optional (safe) migrations you may also want on existing DBs:
-
-```bash
-psql "$DATABASE_URL" -f db/migrations/002-expand-column-lengths.sql
-psql "$DATABASE_URL" -f db/migrations/007_email_threads.sql
 psql "$DATABASE_URL" -f db/migrations/012_whatsapp_joined_at.sql
 ```
 
-### 3.4 Start the server once (runtime migrations)
+Legacy/data-shape migrations (optional but safe on older DBs):
 
-On startup, `server.js` runs `runMigrations()` which creates/updates additional tables/columns (SamCart orders, email thread tables, notes, Calendly subscription storage, Slack threading fields, etc.).
+```bash
+psql "$DATABASE_URL" -f db/migrations/001-add-partial-onboarding.sql
+psql "$DATABASE_URL" -f db/migrations/002-expand-column-lengths.sql
+```
+
+### 3.4 Start server once for runtime migrations
+
+`server.js` also creates/alters tables/columns at startup.
 
 ```bash
 npm run dev
 ```
 
-## 4) Configure Webhooks
+## 4) Run Services
 
-### Typeform → `POST /api/webhooks/typeform`
+### Web/API service
 
-- Webhook URL: `https://<BASE_URL>/api/webhooks/typeform`
-- Optional secret: set the same value in Typeform and `TYPEFORM_WEBHOOK_SECRET`
+```bash
+npm run dev
+```
 
-You can verify the endpoint:
+### Cron worker
+
+```bash
+npm run cron
+```
+
+Cron worker expects:
+
+- `BASE_URL`
+- `CRON_SECRET`
+
+## 5) Configure Webhooks
+
+### Typeform
+
+- URL: `https://<BASE_URL>/api/webhooks/typeform`
+- Optional signature verification with `TYPEFORM_WEBHOOK_SECRET`
+
+Health:
 
 ```bash
 curl https://<BASE_URL>/api/webhooks/typeform/test
 ```
 
-### SamCart → `POST /api/webhooks/samcart`
+### SamCart
 
-- Notify URL: `https://<BASE_URL>/api/webhooks/samcart`
+- URL: `https://<BASE_URL>/api/webhooks/samcart`
 
-You can verify the endpoint:
+Health:
 
 ```bash
 curl https://<BASE_URL>/api/webhooks/samcart/test
 ```
 
-### Calendly → `POST /api/webhooks/calendly`
+### Calendly
 
-If `STEF_CALENDLY_TOKEN` is set, the server will create (or re-use) a webhook subscription automatically on startup using:
+- URL: `https://<BASE_URL>/api/webhooks/calendly`
+- Event expected: `invitee.created`
+- Verification occurs when signing key is present in `calendly_webhook_subscriptions`
 
-- Callback URL: `https://<BASE_URL>/api/webhooks/calendly`
-- Event: `invitee.created`
-
-Health check:
+Health:
 
 ```bash
 curl https://<BASE_URL>/api/webhooks/calendly/test
 ```
 
-If you do *not* configure Calendly via token, you can still point Calendly to the endpoint manually, but signature verification may be skipped unless a signing key is stored in the DB.
+### Wasender
 
-### Wasender (WhatsApp) → `POST /api/webhooks/wasender`
+- URL: `https://<BASE_URL>/api/webhooks/wasender`
+- Recommended event/scope: `group-participants.update`
+- If `WASENDER_WEBHOOK_SECRET` set, pass `x-wasender-secret` header (or `?secret=`)
+- If `WASENDER_ALLOWED_GROUP_JIDS` set, only those groups update joined status
 
-This webhook tracks when a member joins the WhatsApp group and marks the Typeform application as **Joined** (final state).
-
-- Webhook URL: `https://<BASE_URL>/api/webhooks/wasender`
-- Optional secret: set `WASENDER_WEBHOOK_SECRET` and configure Wasender to send `x-wasender-secret: <secret>`
-- Recommended: set `WASENDER_ALLOWED_GROUP_JIDS` so only the intended CA Pro groups mark members as Joined.
-- Recommended scopes/events (minimum):
-  - `group-participants.update`
-
-Health check:
+Health:
 
 ```bash
 curl https://<BASE_URL>/api/webhooks/wasender/test
 ```
 
-## 5) Slack App Setup
+## 6) Slack App Setup
 
-### 5.1 Interactivity + Events URLs
+### Request URLs
 
-- Interactivity request URL: `https://<BASE_URL>/api/slack/interactions`
-- Event subscriptions request URL: `https://<BASE_URL>/api/slack/events`
-- Slash commands request URL: `https://<BASE_URL>/api/slack/commands` (supports `/note`)
+- Interactivity: `https://<BASE_URL>/api/slack/interactions`
+- Events: `https://<BASE_URL>/api/slack/events`
+- Slash command (`/note`): `https://<BASE_URL>/api/slack/commands`
 
-The app verifies Slack signatures, so `SLACK_SIGNING_SECRET` must match your app’s signing secret.
+### Required scopes (minimum)
 
-### 5.2 Required OAuth scopes
-
-At minimum (based on Web API usage in `api/slack.js` and `api/slack-threads.js`):
-
-- `commands` (required for slash commands like `/note`)
+- `commands`
 - `chat:write`
 - `users:read`
-- `im:write` (for `/api/slack/send-welcome`)
-- `channels:history` (if your channels are public)
-- `groups:history` (if your channels are private)
+- `im:write`
+- `channels:history` or `groups:history` (channel type dependent)
 - `im:history`
 - `mpim:history`
 
-### 5.3 Event subscriptions
-
-Subscribe to message events so the bot can respond to thread replies (welcome message edits):
+### Event subscriptions
 
 - `message.channels`
 - `message.groups`
 - `message.im`
 - `message.mpim`
 
-### 5.4 Invite the bot to channels
+### Message shortcuts used by backend
 
-Make sure the bot user is invited to:
+- `add_application_note`
+- `add_cancel_reason`
+
+### Operational channel membership
+
+Bot must be a member of both configured channels:
 
 - `CA_PRO_APPLICATION_SLACK_CHANNEL_ID`
 - `CA_PRO_NOTIFICATIONS_SLACK_CHANNEL`
 
-If the bot is not in the channel, Slack posting/updating will fail.
+## 7) Smoke Tests
 
-## 6) Cron Worker (Railway)
+```bash
+curl https://<BASE_URL>/api/jobs/health
+curl https://<BASE_URL>/api/webhooks/typeform/test
+curl https://<BASE_URL>/api/webhooks/samcart/test
+curl https://<BASE_URL>/api/webhooks/calendly/test
+curl https://<BASE_URL>/api/webhooks/wasender/test
+```
 
-`cron-worker.js` is designed to run on Railway Cron and call job endpoints on your deployed server.
+## 8) Known Setup Pitfalls
 
-### Option A: Run `npm run cron` as a Railway Cron service
-
-- Command: `npm run cron`
-- Schedule: e.g. every 5–15 minutes (your preference)
-- Env vars required:
-  - `BASE_URL` (the deployed server URL)
-  - `CRON_SECRET` (must match server)
-
-### Option B: Call job endpoints directly from an external scheduler
-
-All `/api/jobs/*` cron endpoints require `x-cron-secret: <CRON_SECRET>`.
-
-## 7) Quick Smoke Tests
-
-- Server health: `GET /api/jobs/health`
-- Typeform webhook: `GET /api/webhooks/typeform/test`
-- SamCart webhook: `GET /api/webhooks/samcart/test`
-- Calendly webhook: `GET /api/webhooks/calendly/test`
-- Admin UI: `GET /admin` (note: password gate is client-side only)
+- Schema drift risk: `db/schema.sql` + SQL migrations + `server.js` runtime migrations all mutate schema.
+- `.env.example` is not exhaustive for AI features; add `ANTHROPIC_API_KEY` manually.
+- Admin UI authentication is client-side only; add external access control in production.
+- `api/jobs/trigger-email-flow` is currently broken (missing module import).
+- `api/jobs/process-yearly-renewals/force` is not cron-secret protected; lock down ingress at platform/network layer.
