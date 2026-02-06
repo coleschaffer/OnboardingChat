@@ -7,7 +7,15 @@ router.get('/', async (req, res) => {
     const pool = req.app.locals.pool;
 
     // Get total counts
-    const membersCount = await pool.query('SELECT COUNT(*) FROM business_owners');
+    const membersCount = await pool.query(`
+      SELECT COUNT(*)
+      FROM business_owners bo
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM cancellations c
+        WHERE LOWER(c.member_email) = LOWER(bo.email)
+      )
+    `);
     const teamMembersCount = await pool.query('SELECT COUNT(*) FROM team_members');
     const applicationsCount = await pool.query('SELECT COUNT(*) FROM typeform_applications');
 
@@ -26,7 +34,12 @@ router.get('/', async (req, res) => {
     // Get onboarding status breakdown
     const onboardingStatus = await pool.query(`
       SELECT onboarding_status as status, COUNT(*) as count
-      FROM business_owners
+      FROM business_owners bo
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM cancellations c
+        WHERE LOWER(c.member_email) = LOWER(bo.email)
+      )
       GROUP BY onboarding_status
     `);
 
@@ -52,7 +65,12 @@ router.get('/', async (req, res) => {
     // Get source breakdown
     const sourceBreakdown = await pool.query(`
       SELECT source, COUNT(*) as count
-      FROM business_owners
+      FROM business_owners bo
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM cancellations c
+        WHERE LOWER(c.member_email) = LOWER(bo.email)
+      )
       GROUP BY source
     `);
 
@@ -66,20 +84,30 @@ router.get('/', async (req, res) => {
     // Get members added over time (last 30 days)
     const membersTimeline = await pool.query(`
       SELECT
-        DATE(created_at) as date,
+        DATE(bo.created_at) as date,
         COUNT(*) as count
-      FROM business_owners
-      WHERE created_at > NOW() - INTERVAL '30 days'
-      GROUP BY DATE(created_at)
+      FROM business_owners bo
+      WHERE bo.created_at > NOW() - INTERVAL '30 days'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM cancellations c
+          WHERE LOWER(c.member_email) = LOWER(bo.email)
+        )
+      GROUP BY DATE(bo.created_at)
       ORDER BY date
     `);
 
     // Get revenue tier distribution
     const revenueTiers = await pool.query(`
-      SELECT annual_revenue, COUNT(*) as count
-      FROM business_owners
-      WHERE annual_revenue IS NOT NULL AND annual_revenue != ''
-      GROUP BY annual_revenue
+      SELECT bo.annual_revenue, COUNT(*) as count
+      FROM business_owners bo
+      WHERE bo.annual_revenue IS NOT NULL AND bo.annual_revenue != ''
+        AND NOT EXISTS (
+          SELECT 1
+          FROM cancellations c
+          WHERE LOWER(c.member_email) = LOWER(bo.email)
+        )
+      GROUP BY bo.annual_revenue
       ORDER BY count DESC
       LIMIT 10
     `);

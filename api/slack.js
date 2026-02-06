@@ -433,7 +433,6 @@ function buildOnboardingLookupBlocks(onboardingContext) {
 
     const onboardingFields = [
         { label: 'Submission Status', value: `${statusLabel} (${onboardingContext.onboarding_progress || 0}% progress)` },
-        { label: 'Updated', value: formatDateTime(onboardingContext.onboarding_updated_at || onboardingContext.onboarding_created_at) },
         { label: 'Business Name', value: answers.businessName || onboardingContext.bo_business_name || 'N/A' },
         { label: 'Team Count', value: answers.teamCount || onboardingContext.bo_team_count || 'N/A' },
         { label: 'Traffic Sources', value: answers.trafficSources || 'N/A' },
@@ -442,7 +441,6 @@ function buildOnboardingLookupBlocks(onboardingContext) {
         { label: 'AI Skill Level', value: answers.aiSkillLevel || 'N/A' },
         { label: 'Bio', value: answers.bio || 'N/A' },
         { label: 'Scheduled Call', value: answers.scheduleCall || 'N/A' },
-        { label: 'WhatsApp Joined', value: answers.whatsappJoined || (onboardingContext.bo_whatsapp_joined ? 'done' : 'N/A') },
         { label: 'Team Members Added', value: onboardingTeamMembers },
         { label: 'Partners Added', value: onboardingPartners }
     ];
@@ -522,9 +520,6 @@ function buildBusinessOwnerLookupBlocks(memberRow, onboardingContext, samcartCon
         { label: 'Name', value: memberName },
         { label: 'Email', value: memberRow.email || 'N/A' },
         { label: 'Phone', value: memberRow.phone || 'N/A' },
-        { label: 'Source', value: memberRow.source || 'N/A' },
-        { label: 'Onboarding Status', value: memberRow.onboarding_status || 'N/A' },
-        { label: 'Onboarding Progress', value: `${memberRow.onboarding_progress ?? 0}%` },
         { label: 'Business Name', value: memberRow.business_name || 'N/A' },
         { label: 'Business Overview', value: memberRow.business_overview || 'N/A' },
         { label: 'Annual Revenue', value: memberRow.annual_revenue || 'N/A' },
@@ -535,16 +530,7 @@ function buildBusinessOwnerLookupBlocks(memberRow, onboardingContext, samcartCon
         { label: 'Massive Win', value: memberRow.massive_win || 'N/A' },
         { label: 'AI Skill Level', value: memberRow.ai_skill_level || 'N/A' },
         { label: 'Bio', value: memberRow.bio || 'N/A' },
-        { label: 'WhatsApp Number', value: memberRow.whatsapp_number || 'N/A' },
-        {
-            label: 'WhatsApp Joined',
-            value: memberRow.whatsapp_joined
-                ? `done${memberRow.whatsapp_joined_at ? ` (${formatDateTime(memberRow.whatsapp_joined_at)})` : ''}`
-                : 'not joined'
-        },
-        { label: 'Anything Else', value: memberRow.anything_else || 'N/A' },
-        { label: 'Created', value: formatDateTime(memberRow.created_at) },
-        { label: 'Updated', value: formatDateTime(memberRow.updated_at) }
+        { label: 'Anything Else', value: memberRow.anything_else || 'N/A' }
     ];
     const profileBlocks = buildLookupFieldBlocks(profileFields);
 
@@ -562,9 +548,7 @@ function buildBusinessOwnerLookupBlocks(memberRow, onboardingContext, samcartCon
             { label: 'Phone', value: samcartContext.phone || 'N/A' },
             { label: 'Product', value: samcartContext.product_name || 'N/A' },
             { label: 'Total', value: samcartContext.order_total ? `${samcartContext.order_total} ${samcartContext.currency || 'USD'}` : 'N/A' },
-            { label: 'Status', value: samcartContext.status || 'N/A' },
-            { label: 'Created', value: formatDateTime(samcartContext.created_at) },
-            { label: 'Updated', value: formatDateTime(samcartContext.updated_at) }
+            { label: 'Status', value: samcartContext.status || 'N/A' }
         ];
         samcartBlocks = buildLookupFieldBlocks(samcartFields);
     }
@@ -627,9 +611,7 @@ function buildSamcartLookupBlocks(samcartRow, onboardingContext) {
         { label: 'Order ID', value: samcartRow.samcart_order_id || samcartRow.id || 'N/A' },
         { label: 'Product', value: samcartRow.product_name || 'N/A' },
         { label: 'Total', value: samcartRow.order_total ? `${samcartRow.order_total} ${samcartRow.currency || 'USD'}` : 'N/A' },
-        { label: 'Status', value: samcartRow.status || 'N/A' },
-        { label: 'Created', value: formatDateTime(samcartRow.created_at) },
-        { label: 'Updated', value: formatDateTime(samcartRow.updated_at) }
+        { label: 'Status', value: samcartRow.status || 'N/A' }
     ];
     const samcartBlocks = buildLookupFieldBlocks(samcartFields);
 

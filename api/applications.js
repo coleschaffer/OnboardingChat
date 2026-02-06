@@ -155,8 +155,47 @@ router.get('/:id', async (req, res) => {
           WHEN ta.emailed_at IS NOT NULL THEN 'emailed'
           ELSE 'new'
         END as display_status,
-        COALESCE(ta.whatsapp_joined_at, ta.onboarding_completed_at, ta.onboarding_started_at, ta.purchased_at, ta.call_booked_at, ta.replied_at, ta.emailed_at) as status_timestamp
+        COALESCE(ta.whatsapp_joined_at, ta.onboarding_completed_at, ta.onboarding_started_at, ta.purchased_at, ta.call_booked_at, ta.replied_at, ta.emailed_at) as status_timestamp,
+        CASE WHEN os.id IS NOT NULL THEN true ELSE false END as has_onboarding,
+        bo.id as business_owner_id,
+        bo.first_name as bo_first_name,
+        bo.last_name as bo_last_name,
+        bo.business_name as bo_business_name,
+        bo.onboarding_status as bo_onboarding_status,
+        bo.whatsapp_joined as bo_whatsapp_joined,
+        bo.whatsapp_joined_at as bo_whatsapp_joined_at,
+        os.id as onboarding_submission_id,
+        os.progress_percentage as onboarding_progress,
+        os.is_complete as onboarding_is_complete,
+        os.created_at as onboarding_created_at,
+        os.updated_at as onboarding_updated_at,
+        os.completed_at as onboarding_completed_at,
+        os.data as onboarding_data,
+        c.id as cancellation_id,
+        c.reason as cancellation_reason,
+        c.created_at as cancellation_created_at
       FROM typeform_applications ta
+      LEFT JOIN LATERAL (
+        SELECT bo.*
+        FROM business_owners bo
+        WHERE LOWER(bo.email) = LOWER(ta.email)
+        ORDER BY bo.created_at DESC
+        LIMIT 1
+      ) bo ON true
+      LEFT JOIN LATERAL (
+        SELECT os.*
+        FROM onboarding_submissions os
+        WHERE os.business_owner_id = bo.id
+        ORDER BY os.created_at DESC
+        LIMIT 1
+      ) os ON true
+      LEFT JOIN LATERAL (
+        SELECT id, reason, created_at
+        FROM cancellations c
+        WHERE LOWER(c.member_email) = LOWER(ta.email)
+        ORDER BY c.created_at DESC
+        LIMIT 1
+      ) c ON true
       WHERE ta.id = $1
     `, [id]);
 

@@ -7,6 +7,7 @@ router.get('/', async (req, res) => {
   try {
     const pool = req.app.locals.pool;
     const { source, status, search, limit = 50, offset = 0 } = req.query;
+    const includeCanceled = String(req.query.include_canceled || '').toLowerCase() === 'true';
 
     let query = `
       SELECT
@@ -40,6 +41,14 @@ router.get('/', async (req, res) => {
       paramIndex++;
     }
 
+    if (!includeCanceled) {
+      query += ` AND NOT EXISTS (
+        SELECT 1
+        FROM cancellations c
+        WHERE LOWER(c.member_email) = LOWER(bo.email)
+      )`;
+    }
+
     query += ` GROUP BY bo.id ORDER BY bo.created_at DESC LIMIT $${paramIndex++} OFFSET $${paramIndex++}`;
     params.push(parseInt(limit), parseInt(offset));
 
@@ -61,6 +70,13 @@ router.get('/', async (req, res) => {
     if (search) {
       countQuery += ` AND (first_name ILIKE $${countIndex} OR last_name ILIKE $${countIndex} OR email ILIKE $${countIndex} OR business_name ILIKE $${countIndex})`;
       countParams.push(`%${search}%`);
+    }
+    if (!includeCanceled) {
+      countQuery += ` AND NOT EXISTS (
+        SELECT 1
+        FROM cancellations c
+        WHERE LOWER(c.member_email) = LOWER(business_owners.email)
+      )`;
     }
 
     const countResult = await pool.query(countQuery, countParams);

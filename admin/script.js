@@ -867,11 +867,12 @@ function renderApplicationsTable() {
                             <span class="status-badge ${displayStatus}">${escapeHtml(statusInfo.text)}</span>
                             ${statusInfo.time ? `<span class="status-time">${escapeHtml(statusInfo.time)}</span>` : ''}
                         </div>
-                        <div style="margin-top: 6px;">
-                            <select class="inline-status-select app-status ${app.status || 'new'}"
+                        <div class="review-status-row">
+                            <span class="review-status-label">Review</span>
+                            <select class="inline-status-select app-review-select"
                                     onclick="event.stopPropagation()"
-                                    onchange="event.stopPropagation(); this.className = 'inline-status-select app-status ' + this.value; updateApplicationStatus('${app.id}', this.value)">
-                                <option value="new" ${app.status === 'new' ? 'selected' : ''}>New</option>
+                                    onchange="event.stopPropagation(); updateApplicationStatus('${app.id}', this.value)">
+                                <option value="new" ${app.status === 'new' ? 'selected' : ''}>Unreviewed</option>
                                 <option value="reviewed" ${app.status === 'reviewed' ? 'selected' : ''}>Reviewed</option>
                                 <option value="approved" ${app.status === 'approved' ? 'selected' : ''}>Approved</option>
                                 <option value="rejected" ${app.status === 'rejected' ? 'selected' : ''}>Rejected</option>
@@ -985,131 +986,159 @@ async function viewApplication(id, options = {}) {
 
         const title = ([app.first_name, app.last_name].filter(Boolean).join(' ').trim()) || app.email || 'Typeform Application';
         const subtitle = [app.email, statusInfo.text].filter(Boolean).join(' • ');
-        const activeTab = options.activeTab || 'overview';
+        const activeTab = options.activeTab || 'typeform';
 
-        const overviewHtml = `
-            <h4 style="color: var(--orange); margin-bottom: 12px; border-bottom: 1px solid var(--border); padding-bottom: 8px;">Contact Info (Q1-Q5)</h4>
-            <div class="detail-row">
-                <span class="detail-label">Q1-2: Name</span>
-                <span class="detail-value">${app.first_name || ''} ${app.last_name || ''}</span>
-            </div>
-            <div class="detail-row">
-                <span class="detail-label">Q3: Email</span>
-                <span class="detail-value">${app.email || '-'}</span>
-            </div>
-            <div class="detail-row">
-                <span class="detail-label">Q4: Phone</span>
-                <span class="detail-value">${app.phone || '-'}</span>
-            </div>
-            <div class="detail-row">
-                <span class="detail-label">Q5: Best Way to Reach</span>
-                <span class="detail-value">${app.contact_preference || '-'}</span>
-            </div>
+        const safeText = (value) => {
+            if (value === null || value === undefined) return '-';
+            const text = String(value).trim();
+            return text ? escapeHtml(text) : '-';
+        };
 
-            <h4 style="color: var(--orange); margin: 16px 0 12px 0; border-bottom: 1px solid var(--border); padding-bottom: 8px;">Business Info (Q6-Q8)</h4>
+        const detailRow = (label, valueHtml) => `
             <div class="detail-row">
-                <span class="detail-label">Q6: Business Description</span>
-                <span class="detail-value">${app.business_description || '-'}</span>
+                <span class="detail-label">${escapeHtml(label)}</span>
+                <span class="detail-value">${valueHtml}</span>
             </div>
-            <div class="detail-row">
-                <span class="detail-label">Q7: Annual Revenue</span>
-                <span class="detail-value">${app.annual_revenue || '-'}</span>
-            </div>
-            <div class="detail-row">
-                <span class="detail-label">Q8: Revenue Trend (3 months)</span>
-                <span class="detail-value">${app.revenue_trend || '-'}</span>
-            </div>
+        `;
 
-            <h4 style="color: var(--orange); margin: 16px 0 12px 0; border-bottom: 1px solid var(--border); padding-bottom: 8px;">Goals & Challenges (Q9-Q10)</h4>
-            <div class="detail-row">
-                <span class="detail-label">Q9: #1 Thing Holding Back</span>
-                <span class="detail-value">${app.main_challenge || '-'}</span>
-            </div>
-            <div class="detail-row">
-                <span class="detail-label">Q10: Why CA Pro</span>
-                <span class="detail-value">${app.why_ca_pro || '-'}</span>
-            </div>
+        const detailSection = (label, rows) => `
+            <section class="detail-section">
+                <h4 class="detail-section-title">${escapeHtml(label)}</h4>
+                ${rows.join('')}
+            </section>
+        `;
 
-            <h4 style="color: var(--orange); margin: 16px 0 12px 0; border-bottom: 1px solid var(--border); padding-bottom: 8px;">Readiness (Q11-Q13)</h4>
-            <div class="detail-row">
-                <span class="detail-label">Q11: Investment Readiness</span>
-                <span class="detail-value">${app.investment_readiness || '-'}</span>
-            </div>
-            <div class="detail-row">
-                <span class="detail-label">Q12: Decision Timeline</span>
-                <span class="detail-value">${app.decision_timeline || '-'}</span>
-            </div>
-            <div class="detail-row">
-                <span class="detail-label">Q13: Has Team</span>
-                <span class="detail-value">${app.has_team || '-'}</span>
-            </div>
-
-            <h4 style="color: var(--orange); margin: 16px 0 12px 0; border-bottom: 1px solid var(--border); padding-bottom: 8px;">Additional Info (Q14-Q15)</h4>
-            <div class="detail-row">
-                <span class="detail-label">Q14: Anything Else</span>
-                <span class="detail-value">${app.anything_else || app.additional_info || '-'}</span>
-            </div>
-            <div class="detail-row">
-                <span class="detail-label">Q15: How They Heard About CA Pro</span>
-                <span class="detail-value">${app.referral_source || '-'}</span>
-            </div>
-
-            <h4 style="color: var(--text-secondary); margin: 16px 0 12px 0; border-bottom: 1px solid var(--border); padding-bottom: 8px;">Status</h4>
-            <div class="detail-row">
-                <span class="detail-label">Progress Status</span>
-                <span class="detail-value">
-                    <span class="status-badge ${app.display_status || 'new'}">${statusInfo.text}</span>
-                    ${statusInfo.time ? `<span style="margin-left: 8px; color: var(--gray-500); font-size: 0.8rem;">${statusInfo.time}</span>` : ''}
-                </span>
-            </div>
-            <div class="detail-row">
-                <span class="detail-label">Application Status</span>
-                <span class="detail-value">
-                    <select class="inline-status-select app-status ${app.status || 'new'}" onchange="event.stopPropagation(); this.className = 'inline-status-select app-status ' + this.value; updateApplicationStatus('${id}', this.value)">
-                        <option value="new" ${app.status === 'new' ? 'selected' : ''}>New</option>
+        const typeformSections = [
+            detailSection('Contact', [
+                detailRow('Name', safeText(`${app.first_name || ''} ${app.last_name || ''}`.trim() || '-')),
+                detailRow('Email', safeText(app.email)),
+                detailRow('Phone', safeText(app.phone)),
+                detailRow('Best Way to Reach', safeText(app.contact_preference))
+            ]),
+            detailSection('Business Snapshot', [
+                detailRow('Business Description', safeText(app.business_description)),
+                detailRow('Annual Revenue', safeText(app.annual_revenue)),
+                detailRow('Revenue Trend', safeText(app.revenue_trend))
+            ]),
+            detailSection('Decision & Fit', [
+                detailRow('Why CA Pro', safeText(app.why_ca_pro)),
+                detailRow('Investment Readiness', safeText(app.investment_readiness)),
+                detailRow('Decision Timeline', safeText(app.decision_timeline)),
+                detailRow('Has Team', safeText(app.has_team)),
+                detailRow('Referral Source', safeText(app.referral_source)),
+                detailRow('Anything Else', safeText(app.anything_else || app.additional_info))
+            ]),
+            detailSection('Status', [
+                detailRow(
+                    'Pipeline Stage',
+                    `<span class="status-badge ${escapeHtml(app.display_status || 'new')}">${escapeHtml(statusInfo.text)}</span>${statusInfo.time ? `<span class="status-time-inline">${escapeHtml(statusInfo.time)}</span>` : ''}`
+                ),
+                detailRow(
+                    'Review Status',
+                    `<select class="inline-status-select app-review-select" onchange="event.stopPropagation(); updateApplicationStatus('${id}', this.value)">
+                        <option value="new" ${app.status === 'new' ? 'selected' : ''}>Unreviewed</option>
                         <option value="reviewed" ${app.status === 'reviewed' ? 'selected' : ''}>Reviewed</option>
                         <option value="approved" ${app.status === 'approved' ? 'selected' : ''}>Approved</option>
                         <option value="rejected" ${app.status === 'rejected' ? 'selected' : ''}>Rejected</option>
-                    </select>
-                </span>
-            </div>
-            <div class="detail-row">
-                <span class="detail-label">Applied</span>
-                <span class="detail-value">${formatDate(app.created_at)}</span>
-            </div>
-            ${app.emailed_at ? `<div class="detail-row"><span class="detail-label">Emailed</span><span class="detail-value">${formatDate(app.emailed_at)}</span></div>` : ''}
-            ${app.replied_at ? `<div class="detail-row"><span class="detail-label">Replied</span><span class="detail-value">${formatDate(app.replied_at)}</span></div>` : ''}
-            ${app.call_booked_at ? `<div class="detail-row"><span class="detail-label">Call Booked</span><span class="detail-value">${formatDate(app.call_booked_at)}</span></div>` : ''}
-            ${app.onboarding_started_at ? `<div class="detail-row"><span class="detail-label">Chat Started</span><span class="detail-value">${formatDate(app.onboarding_started_at)}</span></div>` : ''}
-            ${app.onboarding_completed_at ? `<div class="detail-row"><span class="detail-label">Chat Complete</span><span class="detail-value">${formatDate(app.onboarding_completed_at)}</span></div>` : ''}
-            ${app.whatsapp_joined_at ? `<div class="detail-row"><span class="detail-label">WhatsApp Joined</span><span class="detail-value">${formatDate(app.whatsapp_joined_at)}</span></div>` : ''}
-        `;
+                    </select>`
+                ),
+                detailRow('Applied', safeText(formatDate(app.created_at))),
+                ...(app.emailed_at ? [detailRow('Emailed', safeText(formatDate(app.emailed_at)))] : []),
+                ...(app.replied_at ? [detailRow('Replied', safeText(formatDate(app.replied_at)))] : []),
+                ...(app.call_booked_at ? [detailRow('Call Booked', safeText(formatDate(app.call_booked_at)))] : []),
+                ...(app.purchased_at ? [detailRow('Purchased', safeText(formatDate(app.purchased_at)))] : []),
+                ...(app.onboarding_started_at ? [detailRow('Chat Started', safeText(formatDate(app.onboarding_started_at)))] : []),
+                ...(app.onboarding_completed_at ? [detailRow('Chat Complete', safeText(formatDate(app.onboarding_completed_at)))] : []),
+                ...(app.whatsapp_joined_at ? [detailRow('WhatsApp Joined', safeText(formatDate(app.whatsapp_joined_at)))] : []),
+                ...(app.cancellation_id ? [
+                    detailRow('Cancellation', `<span class="status-badge rejected">Canceled</span><span class="status-time-inline">${safeText(formatDate(app.cancellation_created_at))}</span>`),
+                    detailRow('Cancellation Reason', safeText(app.cancellation_reason))
+                ] : [])
+            ])
+        ];
+
+        const overviewHtml = typeformSections.join('');
 
         const notesHtml = `
             ${renderNotesSection(notes, id)}
         `;
 
-        const rawData = app.raw_data || {};
+        let onboardingData = {};
+        if (app.onboarding_data && typeof app.onboarding_data === 'object') {
+            onboardingData = app.onboarding_data;
+        } else if (typeof app.onboarding_data === 'string') {
+            try {
+                onboardingData = JSON.parse(app.onboarding_data);
+            } catch {
+                onboardingData = {};
+            }
+        }
+        const answers = (onboardingData.answers && typeof onboardingData.answers === 'object') ? onboardingData.answers : {};
+        const onboardingTeamCount = Array.isArray(onboardingData.teamMembers) ? onboardingData.teamMembers.length : 0;
+        const onboardingPartnerCount = Array.isArray(onboardingData.cLevelPartners) ? onboardingData.cLevelPartners.length : 0;
+
+        let onboardingHtml = '';
+        if (!app.onboarding_submission_id) {
+            onboardingHtml = `
+                <div class="empty-state-card">
+                    <h4>No Onboarding Chat Submission Yet</h4>
+                    <p>This member has Typeform data, but no linked onboarding chat submission was found yet.</p>
+                </div>
+            `;
+        } else {
+            const onboardingStatusText = app.onboarding_is_complete
+                ? `Complete (${app.onboarding_progress || 0}%)`
+                : `In Progress (${app.onboarding_progress || 0}%)`;
+
+            onboardingHtml = [
+                detailSection('Submission', [
+                    detailRow('Status', safeText(onboardingStatusText)),
+                    detailRow('Updated', safeText(formatDate(app.onboarding_updated_at || app.onboarding_created_at))),
+                    detailRow('Completed', safeText(app.onboarding_completed_at ? formatDate(app.onboarding_completed_at) : '-')),
+                    detailRow('Linked Member', safeText(`${app.bo_first_name || ''} ${app.bo_last_name || ''}`.trim() || app.email || '-')),
+                    detailRow('Member Status', safeText(app.bo_onboarding_status)),
+                    detailRow('Business Name', safeText(answers.businessName || app.bo_business_name))
+                ]),
+                detailSection('Business & Growth', [
+                    detailRow('Team Count', safeText(answers.teamCount)),
+                    detailRow('Traffic Sources', safeText(answers.trafficSources)),
+                    detailRow('Landing Pages', safeText(answers.landingPages)),
+                    detailRow('Massive Win', safeText(answers.massiveWin)),
+                    detailRow('AI Skill Level', safeText(answers.aiSkillLevel)),
+                    detailRow('Bio', safeText(answers.bio))
+                ]),
+                detailSection('Setup & Team', [
+                    detailRow('Scheduled Call', safeText(answers.scheduleCall)),
+                    detailRow('WhatsApp Joined', safeText(answers.whatsappJoined || (app.bo_whatsapp_joined ? 'done' : '-'))),
+                    detailRow('Team Members Added', safeText(onboardingTeamCount)),
+                    detailRow('Partners Added', safeText(onboardingPartnerCount))
+                ])
+            ].join('');
+        }
+
+        const rawData = {
+            typeform: app.raw_data || {},
+            onboarding: app.onboarding_data || null
+        };
         const rawHtml = `
             <pre style="background: var(--gray-50); padding: 16px; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; border: 1px solid var(--gray-200);">${escapeHtml(JSON.stringify(rawData, null, 2))}</pre>
         `;
+
+        const convertButton = app.business_owner_id
+            ? '<button class="btn btn-secondary btn-sm" type="button" disabled>Already a Member</button>'
+            : `<button class="btn btn-primary btn-sm" type="button" onclick="convertApplication('${id}')">Convert to Member</button>`;
 
         panelState.activeTabId = activeTab;
         openItemPanel({
             title,
             subtitle,
             tabs: [
-                { id: 'overview', label: 'Overview', content: overviewHtml },
+                { id: 'typeform', label: 'Typeform', content: overviewHtml },
+                { id: 'onboarding', label: app.onboarding_submission_id ? 'Onboarding Chat' : 'Onboarding Chat (None)', content: onboardingHtml },
                 { id: 'notes', label: `Notes (${notes.length})`, content: notesHtml },
-                { id: 'raw', label: 'Raw', content: rawHtml }
+                { id: 'raw', label: 'Raw JSON', content: rawHtml }
             ],
-            footer: `
-                <button class="btn btn-secondary btn-sm" type="button" onclick="convertApplication('${id}')">Convert to Member</button>
-                <button class="btn btn-secondary btn-sm" type="button" onclick="simulateSubscriptionFailures('${id}')">Simulate Charge Failed</button>
-                <button class="btn btn-secondary btn-sm" type="button" onclick="simulateSubscriptionRecovered('${id}')">Simulate Recovered</button>
-                <button class="btn btn-secondary btn-sm" type="button" onclick="simulateSubscriptionCancel('${id}')">Simulate Subscription Canceled</button>
-                <button class="btn btn-secondary btn-sm" type="button" onclick="runYearlyRenewalsForce()">Run Yearly Renewals (Force)</button>
-            `
+            footer: convertButton
         });
     } catch (error) {
         showToast('Failed to load application details', 'error');
@@ -1122,7 +1151,8 @@ async function updateApplicationStatus(id, status) {
             method: 'PUT',
             body: JSON.stringify({ status })
         });
-        showToast(`Application marked as ${status}`, 'success');
+        const label = status === 'new' ? 'unreviewed' : status;
+        showToast(`Application marked as ${label}`, 'success');
         loadApplications();
         loadOverview();
     } catch (error) {
@@ -2304,7 +2334,7 @@ function changePage(type, page) {
     }
 }
 
-// Right-side Item Panel (Monday-style)
+// Details modal with tabbed content
 const panelState = {
     tabs: [],
     activeTabId: null
@@ -2371,7 +2401,7 @@ function closeItemPanel() {
     panelState.activeTabId = null;
 }
 
-// Keep legacy modal API but route it into the right-side panel
+// Keep legacy modal API but route it into the details modal
 function openModal(title, content) {
     openItemPanel({ title, content });
 }
