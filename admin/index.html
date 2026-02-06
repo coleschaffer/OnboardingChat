@@ -104,6 +104,7 @@
                         </button>
                     </div>
                 </header>
+                <div class="workspace-search-results" id="workspace-search-results" style="display: none;"></div>
 
                 <div class="stats-grid">
                     <div class="stat-card">
@@ -116,17 +117,6 @@
                         <div class="stat-info">
                             <span class="stat-value" id="stat-members">-</span>
                             <span class="stat-label">Total Members</span>
-                        </div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon completed">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <polyline points="20 6 9 17 4 12"></polyline>
-                            </svg>
-                        </div>
-                        <div class="stat-info">
-                            <span class="stat-value" id="stat-pending">-</span>
-                            <span class="stat-label">Completed Onboarding</span>
                         </div>
                     </div>
                     <div class="stat-card">
@@ -157,13 +147,6 @@
                     </div>
                 </div>
 
-                <div class="workspace-toolbar">
-                    <button class="btn btn-secondary btn-sm" onclick="setWorkspaceSection('pipeline', 'pipeline-applications-section'); switchTab('pipeline')">Open Pipeline Board</button>
-                    <button class="btn btn-secondary btn-sm" onclick="setWorkspaceSection('pipeline', 'pipeline-onboarding-section'); switchTab('pipeline')">Open Onboarding Queue</button>
-                    <button class="btn btn-secondary btn-sm" onclick="switchTab('people')">Open People Workspace</button>
-                    <button class="btn btn-secondary btn-sm" onclick="switchTab('ops')">Open Ops Workspace</button>
-                </div>
-
                 <div class="overview-grid">
                     <div class="card">
                         <h3>Recent Activity</h3>
@@ -171,17 +154,11 @@
                             <div class="loading">Loading...</div>
                         </div>
                     </div>
-                    <div class="card">
-                        <h3>Onboarding Status</h3>
-                        <div class="status-chart" id="status-chart">
-                            <div class="loading">Loading...</div>
-                        </div>
-                    </div>
                 </div>
 
                 <div class="card" style="margin-top: 20px;">
-                    <h3>Priority Queue</h3>
-                    <div id="priority-queue-list">
+                    <h3>Recent People</h3>
+                    <div id="recent-people-list">
                         <div class="loading">Loading...</div>
                     </div>
                 </div>
@@ -193,18 +170,14 @@
                     <h2>Pipeline Workspace</h2>
                 </header>
 
-                <div class="pipeline-summary-grid" id="pipeline-summary-cards">
-                    <div class="loading">Loading pipeline summary...</div>
-                </div>
-
                 <div class="workspace-switcher" data-workspace="pipeline">
                     <button class="workspace-switch-btn active" data-workspace="pipeline" data-target="pipeline-applications-section">Typeform Board</button>
-                    <button class="workspace-switch-btn" data-workspace="pipeline" data-target="pipeline-onboarding-section">Onboarding Queue</button>
+                    <button class="workspace-switch-btn" data-workspace="pipeline" data-target="pipeline-onboarding-section">Onboarding Chat</button>
                 </div>
 
                 <section class="workspace-section active" id="pipeline-applications-section" data-workspace-group="pipeline">
                     <div class="section-header">
-                        <h3>Typeform Applications</h3>
+                        <h3>Typeform Pipeline</h3>
                         <div class="header-actions">
                             <div class="search-box">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -213,42 +186,16 @@
                                 </svg>
                                 <input type="text" placeholder="Search typeform..." id="applications-search">
                             </div>
-                            <select id="applications-filter" class="filter-select">
-                                <option value="">All Status</option>
-                                <option value="new">New</option>
-                                <option value="reviewed">Reviewed</option>
-                                <option value="approved">Approved</option>
-                                <option value="rejected">Rejected</option>
-                            </select>
                         </div>
                     </div>
-                    <div class="table-container">
-                        <table class="data-table" id="applications-table">
-                            <thead>
-                                <tr>
-                                    <th>Name</th>
-                                    <th>Email</th>
-                                    <th>Revenue</th>
-                                    <th>Status</th>
-                                    <th>Notes</th>
-                                    <th>Applied</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody id="applications-tbody">
-                                <tr><td colspan="7" class="loading">Loading...</td></tr>
-                            </tbody>
-                        </table>
+                    <div class="kanban-board" id="pipeline-kanban-board">
+                        <div class="loading">Loading pipeline...</div>
                     </div>
-                    <div class="pagination" id="applications-pagination"></div>
                 </section>
 
                 <section class="workspace-section" id="pipeline-onboarding-section" data-workspace-group="pipeline">
-                    <div class="onboarding-stats" id="onboarding-stats">
-                        <div class="loading">Loading...</div>
-                    </div>
                     <div class="section-header">
-                        <h3>Onboarding Submissions</h3>
+                        <h3>Onboarding Chat</h3>
                         <div class="header-actions">
                             <div class="search-box">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -257,11 +204,6 @@
                                 </svg>
                                 <input type="text" placeholder="Search submissions..." id="submissions-search">
                             </div>
-                            <select id="submissions-filter" class="filter-select">
-                                <option value="">All Submissions</option>
-                                <option value="true">Complete</option>
-                                <option value="false">Incomplete</option>
-                            </select>
                         </div>
                     </div>
                     <div class="table-container">
@@ -306,18 +248,6 @@
                                 </svg>
                                 <input type="text" placeholder="Search members..." id="members-search">
                             </div>
-                            <select id="members-source-filter" class="filter-select">
-                                <option value="">All Sources</option>
-                                <option value="typeform">Typeform</option>
-                                <option value="csv_import">CSV Import</option>
-                                <option value="chat_onboarding">Chat Onboarding</option>
-                            </select>
-                            <select id="members-status-filter" class="filter-select">
-                                <option value="">All Status</option>
-                                <option value="pending">Pending</option>
-                                <option value="in_progress">In Progress</option>
-                                <option value="completed">Completed</option>
-                            </select>
                         </div>
                     </div>
                     <div class="table-container">
@@ -338,7 +268,6 @@
                             </tbody>
                         </table>
                     </div>
-                    <div class="pagination" id="members-pagination"></div>
                 </section>
 
                 <section class="workspace-section" id="people-team-section" data-workspace-group="people">
@@ -371,7 +300,6 @@
                             </tbody>
                         </table>
                     </div>
-                    <div class="pagination" id="team-members-pagination"></div>
                 </section>
             </div>
 
@@ -379,9 +307,6 @@
             <div class="tab-content" id="tab-ops">
                 <header class="content-header">
                     <h2>Ops Workspace</h2>
-                    <div class="header-actions">
-                        <button class="btn btn-secondary btn-sm" onclick="runYearlyRenewalsForce()">Run Yearly Renewals (Force)</button>
-                    </div>
                 </header>
 
                 <section class="workspace-section active" id="ops-cancellations-section">
@@ -417,40 +342,7 @@
                 </section>
 
                 <section class="workspace-section active" id="ops-import-section" style="margin-top: 24px;">
-                    <h3 style="margin-bottom: 12px;">Import Data</h3>
-                    <div class="import-grid">
-                        <div class="card import-card">
-                            <h3>Import Business Owners</h3>
-                            <p>Upload a CSV file with business owner data from Google Forms export.</p>
-                            <div class="upload-area" id="bo-upload-area">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                                    <polyline points="17 8 12 3 7 8"></polyline>
-                                    <line x1="12" y1="3" x2="12" y2="15"></line>
-                                </svg>
-                                <span>Drop CSV file here or click to browse</span>
-                                <input type="file" id="bo-file-input" accept=".csv" hidden>
-                            </div>
-                            <div class="import-result" id="bo-import-result"></div>
-                        </div>
-
-                        <div class="card import-card">
-                            <h3>Import Team Members</h3>
-                            <p>Upload a CSV file with team member data from Google Forms export.</p>
-                            <div class="upload-area" id="tm-upload-area">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                                    <polyline points="17 8 12 3 7 8"></polyline>
-                                    <line x1="12" y1="3" x2="12" y2="15"></line>
-                                </svg>
-                                <span>Drop CSV file here or click to browse</span>
-                                <input type="file" id="tm-file-input" accept=".csv" hidden>
-                            </div>
-                            <div class="import-result" id="tm-import-result"></div>
-                        </div>
-                    </div>
-
-                    <h3 style="margin: 32px 0 16px;">Import History</h3>
+                    <h3 style="margin: 0 0 16px;">Import History</h3>
                     <div class="table-container">
                         <table class="data-table" id="import-history-table">
                             <thead>

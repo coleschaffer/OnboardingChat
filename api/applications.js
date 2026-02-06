@@ -244,6 +244,142 @@ router.put('/:id/status', async (req, res) => {
   }
 });
 
+// Update pipeline stage (display_status)
+router.put('/:id/pipeline-stage', async (req, res) => {
+  try {
+    const pool = req.app.locals.pool;
+    const { id } = req.params;
+    const { stage } = req.body || {};
+
+    const validStages = ['new', 'emailed', 'replied', 'call_booked', 'purchased', 'onboarding_started', 'onboarding_complete', 'joined'];
+    if (!validStages.includes(stage)) {
+      return res.status(400).json({ error: 'Invalid pipeline stage' });
+    }
+
+    let query = '';
+    if (stage === 'new') {
+      query = `
+        UPDATE typeform_applications
+        SET emailed_at = NULL,
+            replied_at = NULL,
+            call_booked_at = NULL,
+            purchased_at = NULL,
+            onboarding_started_at = NULL,
+            onboarding_completed_at = NULL,
+            whatsapp_joined_at = NULL
+        WHERE id = $1
+        RETURNING *
+      `;
+    } else if (stage === 'emailed') {
+      query = `
+        UPDATE typeform_applications
+        SET emailed_at = COALESCE(emailed_at, NOW()),
+            replied_at = NULL,
+            call_booked_at = NULL,
+            purchased_at = NULL,
+            onboarding_started_at = NULL,
+            onboarding_completed_at = NULL,
+            whatsapp_joined_at = NULL
+        WHERE id = $1
+        RETURNING *
+      `;
+    } else if (stage === 'replied') {
+      query = `
+        UPDATE typeform_applications
+        SET emailed_at = COALESCE(emailed_at, NOW()),
+            replied_at = COALESCE(replied_at, NOW()),
+            call_booked_at = NULL,
+            purchased_at = NULL,
+            onboarding_started_at = NULL,
+            onboarding_completed_at = NULL,
+            whatsapp_joined_at = NULL
+        WHERE id = $1
+        RETURNING *
+      `;
+    } else if (stage === 'call_booked') {
+      query = `
+        UPDATE typeform_applications
+        SET emailed_at = COALESCE(emailed_at, NOW()),
+            replied_at = COALESCE(replied_at, NOW()),
+            call_booked_at = COALESCE(call_booked_at, NOW()),
+            purchased_at = NULL,
+            onboarding_started_at = NULL,
+            onboarding_completed_at = NULL,
+            whatsapp_joined_at = NULL
+        WHERE id = $1
+        RETURNING *
+      `;
+    } else if (stage === 'purchased') {
+      query = `
+        UPDATE typeform_applications
+        SET emailed_at = COALESCE(emailed_at, NOW()),
+            replied_at = COALESCE(replied_at, NOW()),
+            call_booked_at = COALESCE(call_booked_at, NOW()),
+            purchased_at = COALESCE(purchased_at, NOW()),
+            onboarding_started_at = NULL,
+            onboarding_completed_at = NULL,
+            whatsapp_joined_at = NULL
+        WHERE id = $1
+        RETURNING *
+      `;
+    } else if (stage === 'onboarding_started') {
+      query = `
+        UPDATE typeform_applications
+        SET emailed_at = COALESCE(emailed_at, NOW()),
+            replied_at = COALESCE(replied_at, NOW()),
+            call_booked_at = COALESCE(call_booked_at, NOW()),
+            purchased_at = COALESCE(purchased_at, NOW()),
+            onboarding_started_at = COALESCE(onboarding_started_at, NOW()),
+            onboarding_completed_at = NULL,
+            whatsapp_joined_at = NULL
+        WHERE id = $1
+        RETURNING *
+      `;
+    } else if (stage === 'onboarding_complete') {
+      query = `
+        UPDATE typeform_applications
+        SET emailed_at = COALESCE(emailed_at, NOW()),
+            replied_at = COALESCE(replied_at, NOW()),
+            call_booked_at = COALESCE(call_booked_at, NOW()),
+            purchased_at = COALESCE(purchased_at, NOW()),
+            onboarding_started_at = COALESCE(onboarding_started_at, NOW()),
+            onboarding_completed_at = COALESCE(onboarding_completed_at, NOW()),
+            whatsapp_joined_at = NULL
+        WHERE id = $1
+        RETURNING *
+      `;
+    } else if (stage === 'joined') {
+      query = `
+        UPDATE typeform_applications
+        SET emailed_at = COALESCE(emailed_at, NOW()),
+            replied_at = COALESCE(replied_at, NOW()),
+            call_booked_at = COALESCE(call_booked_at, NOW()),
+            purchased_at = COALESCE(purchased_at, NOW()),
+            onboarding_started_at = COALESCE(onboarding_started_at, NOW()),
+            onboarding_completed_at = COALESCE(onboarding_completed_at, NOW()),
+            whatsapp_joined_at = COALESCE(whatsapp_joined_at, NOW())
+        WHERE id = $1
+        RETURNING *
+      `;
+    }
+
+    const result = await pool.query(query, [id]);
+    if (!result.rows.length) {
+      return res.status(404).json({ error: 'Application not found' });
+    }
+
+    await pool.query(`
+      INSERT INTO activity_log (action, entity_type, entity_id, details)
+      VALUES ($1, $2, $3, $4)
+    `, ['application_pipeline_stage_changed', 'application', id, JSON.stringify({ stage })]);
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error updating application pipeline stage:', error);
+    res.status(500).json({ error: 'Failed to update application pipeline stage' });
+  }
+});
+
 // Convert approved application to business owner
 router.post('/:id/convert', async (req, res) => {
   try {

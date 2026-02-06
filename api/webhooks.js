@@ -629,7 +629,7 @@ async function countSubscriptionFailures(pool, email, periodKey, since = null) {
 
 function buildMonthlyBounceTemplate(firstName) {
   const greetingName = firstName || 'there';
-  return `Hey ${greetingName}, hope you're doing well! Just wanted to give you a heads up - your most recent CA Pro payment didn't go through.\n\nIt'll automatically retry in a few days, so if your card is good you can ignore this. Otherwise, I can send you a link to update your payment info. Let me know if you need any help!`;
+  return `Hey ${greetingName}, hope you're doing well! Just wanted to give you a heads up - your most recent CA Pro payment didn't go through.\n\nIt'll automatically retry in a few days, so if your card is good you can ignore this. Otherwise, here is link to update your payment info: https://copyaccelerator.samcart.com/customer_hub/login. Let me know if you need any help!`;
 }
 
 async function extractPhoneFromMondayItem(mondayItem) {

@@ -10,6 +10,18 @@ let membersPage = 0;
 let teamMembersPage = 0;
 let cancellationsPage = 0;
 const pageSize = 20;
+const listFetchLimit = 10000;
+const pipelineStageOrder = ['new', 'emailed', 'replied', 'call_booked', 'purchased', 'onboarding_started', 'onboarding_complete', 'joined'];
+const pipelineStageLabels = {
+    new: 'New',
+    emailed: 'Emailed',
+    replied: 'Replied',
+    call_booked: 'Call Booked',
+    purchased: 'Purchased',
+    onboarding_started: 'Onboarding Started',
+    onboarding_complete: 'Onboarding Complete',
+    joined: 'Joined'
+};
 const workspaceSectionDefaults = {
     pipeline: 'pipeline-applications-section',
     people: 'people-owners-section'
@@ -73,6 +85,8 @@ let teamMembersSort = (() => {
         return { key: 'created_at', dir: 'desc' };
     }
 })();
+let workspaceSearchDebounce = null;
+let searchPreviewController = null;
 
 // Password Gate
 function checkAuth() {
@@ -117,7 +131,6 @@ function initializeDashboard() {
     setupWorkspaceSearch();
     setupSearch();
     setupFilters();
-    setupImport();
     switchTab(currentTab);
 }
 
@@ -207,12 +220,44 @@ function setWorkspaceSection(workspace, targetId) {
 
 function setupWorkspaceSearch() {
     const input = document.getElementById('workspace-search');
+    const resultsEl = document.getElementById('workspace-search-results');
     if (!input) return;
 
+    const closeResults = () => {
+        if (!resultsEl) return;
+        resultsEl.style.display = 'none';
+        resultsEl.innerHTML = '';
+    };
+
+    document.addEventListener('click', (event) => {
+        if (!resultsEl || resultsEl.style.display === 'none') return;
+        if (event.target === input || input.contains(event.target) || resultsEl.contains(event.target)) return;
+        closeResults();
+    });
+
+    input.addEventListener('input', () => {
+        const query = (input.value || '').trim();
+        clearTimeout(workspaceSearchDebounce);
+
+        if (query.length < 2) {
+            closeResults();
+            return;
+        }
+
+        workspaceSearchDebounce = setTimeout(() => {
+            runWorkspaceSearchPreview(query);
+        }, 220);
+    });
+
     input.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            closeResults();
+            return;
+        }
         if (event.key !== 'Enter') return;
         event.preventDefault();
         runWorkspaceSearch(input.value || '');
+        closeResults();
     });
 }
 
@@ -240,9 +285,99 @@ function runWorkspaceSearch(rawQuery) {
     switchTab('pipeline');
 }
 
+async function runWorkspaceSearchPreview(query) {
+    const resultsEl = document.getElementById('workspace-search-results');
+    if (!resultsEl) return;
+
+    if (searchPreviewController) {
+        searchPreviewController.abort();
+    }
+    searchPreviewController = new AbortController();
+
+    try {
+        const params = new URLSearchParams({
+            search: query,
+            limit: 6,
+            offset: 0
+        });
+
+        const [appsData, membersData] = await Promise.all([
+            fetchAPI(`/applications?${params}`, { signal: searchPreviewController.signal }),
+            fetchAPI(`/members?${params}`, { signal: searchPreviewController.signal })
+        ]);
+
+        const apps = appsData.applications || [];
+        const members = membersData.members || [];
+        const hasResults = apps.length > 0 || members.length > 0;
+
+        if (!hasResults) {
+            resultsEl.innerHTML = `
+                <div class="workspace-search-group">
+                    <div class="workspace-search-group-title">Search</div>
+                    <div class="workspace-search-empty">No matches for "${escapeHtml(query)}"</div>
+                </div>
+            `;
+            resultsEl.style.display = 'block';
+            return;
+        }
+
+        const appItems = apps.map(app => {
+            const name = `${app.first_name || ''} ${app.last_name || ''}`.trim() || 'Unknown';
+            const stage = formatDisplayStatus(app.display_status || 'new').text;
+            return `
+                <button class="workspace-search-item" type="button" onclick="openSearchResultApplication('${app.id}')">
+                    <span class="workspace-search-item-main">${escapeHtml(name)}</span>
+                    <span class="workspace-search-item-meta">${escapeHtml(app.email || '-')} • ${escapeHtml(stage)}</span>
+                </button>
+            `;
+        }).join('');
+
+        const memberItems = members.map(member => {
+            const name = `${member.first_name || ''} ${member.last_name || ''}`.trim() || 'Unknown';
+            return `
+                <button class="workspace-search-item" type="button" onclick="openSearchResultMember('${member.id}')">
+                    <span class="workspace-search-item-main">${escapeHtml(name)}</span>
+                    <span class="workspace-search-item-meta">${escapeHtml(member.email || '-')} • ${escapeHtml(member.business_name || 'No business name')}</span>
+                </button>
+            `;
+        }).join('');
+
+        resultsEl.innerHTML = `
+            <div class="workspace-search-group">
+                <div class="workspace-search-group-title">Pipeline</div>
+                ${appItems || '<div class="workspace-search-empty">No pipeline matches</div>'}
+            </div>
+            <div class="workspace-search-group">
+                <div class="workspace-search-group-title">People</div>
+                ${memberItems || '<div class="workspace-search-empty">No people matches</div>'}
+            </div>
+        `;
+        resultsEl.style.display = 'block';
+    } catch (error) {
+        if (error?.name === 'AbortError') return;
+        console.error('Search preview error:', error);
+    }
+}
+
+function openSearchResultApplication(id) {
+    const panel = document.getElementById('workspace-search-results');
+    if (panel) panel.style.display = 'none';
+    setWorkspaceSection('pipeline', 'pipeline-applications-section');
+    switchTab('pipeline');
+    viewApplication(id);
+}
+
+function openSearchResultMember(id) {
+    const panel = document.getElementById('workspace-search-results');
+    if (panel) panel.style.display = 'none';
+    setWorkspaceSection('people', 'people-owners-section');
+    switchTab('people');
+    viewMember(id);
+}
+
 function loadCommandCenter() {
     loadOverview();
-    loadPriorityQueue();
+    loadRecentPeople();
 }
 
 function loadPipeline() {
@@ -300,37 +435,7 @@ function setupSearch() {
 
 // Filter setup
 function setupFilters() {
-    const applicationsFilter = document.getElementById('applications-filter');
-    const membersSourceFilter = document.getElementById('members-source-filter');
-    const membersStatusFilter = document.getElementById('members-status-filter');
-
-    if (applicationsFilter) {
-        applicationsFilter.addEventListener('change', () => {
-            applicationsPage = 0;
-            loadApplications();
-        });
-    }
-
-    if (membersSourceFilter) {
-        membersSourceFilter.addEventListener('change', () => {
-            membersPage = 0;
-            loadMembers();
-        });
-    }
-
-    if (membersStatusFilter) {
-        membersStatusFilter.addEventListener('change', () => {
-            membersPage = 0;
-            loadMembers();
-        });
-    }
-
-    const submissionsFilter = document.getElementById('submissions-filter');
-    if (submissionsFilter) {
-        submissionsFilter.addEventListener('change', () => {
-            loadOnboarding();
-        });
-    }
+    // Filters intentionally removed for People and Pipeline sections to simplify workflows.
 }
 
 // Overview
@@ -339,118 +444,62 @@ async function loadOverview() {
         const stats = await fetchAPI('/stats');
 
         // Update stat cards
-        document.getElementById('stat-members').textContent = stats.totals.members;
-        document.getElementById('stat-pending').textContent = stats.totals.pending_onboardings;
-        document.getElementById('stat-applications').textContent = stats.totals.recent_applications;
-        document.getElementById('stat-team').textContent = stats.totals.team_members;
+        const statMembers = document.getElementById('stat-members');
+        const statApplications = document.getElementById('stat-applications');
+        const statTeam = document.getElementById('stat-team');
+        if (statMembers) statMembers.textContent = stats.totals.members;
+        if (statApplications) statApplications.textContent = stats.totals.recent_applications;
+        if (statTeam) statTeam.textContent = stats.totals.team_members;
 
         // Update badge - only count truly new applications (without matching onboarding)
         const badge = document.getElementById('new-applications-badge');
         const newCount = stats.truly_new_applications || 0;
-        badge.textContent = newCount;
-        badge.style.display = newCount > 0 ? 'inline' : 'none';
+        if (badge) {
+            badge.textContent = newCount;
+            badge.style.display = newCount > 0 ? 'inline' : 'none';
+        }
 
         // Activity feed
         renderActivityFeed(stats.recent_activity);
-
-        // Status chart
-        renderStatusChart(stats.onboarding_status);
     } catch (error) {
         console.error('Error loading overview:', error);
         showToast('Failed to load dashboard', 'error');
     }
 }
 
-async function loadPriorityQueue() {
-    const queue = document.getElementById('priority-queue-list');
-    if (!queue) return;
+async function loadRecentPeople() {
+    const list = document.getElementById('recent-people-list');
+    if (!list) return;
 
-    queue.innerHTML = '<div class="loading">Loading...</div>';
+    list.innerHTML = '<div class="loading">Loading...</div>';
 
     try {
-        const data = await fetchAPI('/applications?limit=250&offset=0');
-        const apps = data.applications || [];
+        const data = await fetchAPI('/members?limit=8&offset=0');
+        const members = data.members || [];
 
-        if (apps.length === 0) {
-            queue.innerHTML = '<p class="muted-inline">No applications yet.</p>';
+        if (!members.length) {
+            list.innerHTML = '<p class="muted-inline">No recent people found.</p>';
             return;
         }
 
-        const now = Date.now();
-        const prioritized = apps
-            .map(app => {
-                const stage = app.display_status || 'new';
-                const statusAt = new Date(app.status_timestamp || app.created_at || 0).getTime();
-                const ageHours = Math.max(0, Math.round((now - statusAt) / (1000 * 60 * 60)));
-
-                let priority = 0;
-                let reason = 'Review profile';
-
-                if (stage === 'new') {
-                    priority = 100;
-                    reason = 'New Typeform application';
-                } else if (stage === 'emailed') {
-                    priority = 86;
-                    reason = 'Follow up on outbound email';
-                } else if (stage === 'replied') {
-                    priority = 78;
-                    reason = 'Reply received, next action needed';
-                } else if (stage === 'call_booked') {
-                    priority = 68;
-                    reason = 'Call booked, prep handoff';
-                } else if (stage === 'purchased') {
-                    priority = 74;
-                    reason = 'Purchased, awaiting onboarding progress';
-                } else if (stage === 'onboarding_started') {
-                    priority = ageHours >= 72 ? 96 : 62;
-                    reason = ageHours >= 72 ? 'Onboarding stalled for 72h+' : 'Onboarding in progress';
-                } else if (stage === 'onboarding_complete') {
-                    priority = 50;
-                    reason = 'Onboarding complete, confirm WhatsApp join';
-                } else if (stage === 'joined') {
-                    priority = 25;
-                    reason = 'Fully onboarded';
-                }
-
-                return {
-                    ...app,
-                    priority,
-                    reason,
-                    ageHours
-                };
-            })
-            .filter(item => item.priority >= 50)
-            .sort((a, b) => {
-                if (b.priority !== a.priority) return b.priority - a.priority;
-                return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
-            })
-            .slice(0, 8);
-
-        if (prioritized.length === 0) {
-            queue.innerHTML = '<p class="muted-inline">No urgent items right now.</p>';
-            return;
-        }
-
-        queue.innerHTML = prioritized.map(app => {
-            const stageInfo = formatDisplayStatus(app.display_status || 'new', app.status_timestamp);
-            const name = `${app.first_name || ''} ${app.last_name || ''}`.trim() || 'Unknown';
-            const staleText = app.ageHours >= 24 ? ` • ${app.ageHours}h` : '';
+        list.innerHTML = members.map(member => {
+            const name = `${member.first_name || ''} ${member.last_name || ''}`.trim() || 'Unknown';
+            const source = String(member.source || '-').replace(/_/g, ' ');
             return `
                 <div class="priority-item">
                     <div class="priority-main">
                         <div class="priority-title">${escapeHtml(name)}</div>
-                        <div class="priority-meta">${escapeHtml(app.email || 'No email')} • ${escapeHtml(app.reason)}${escapeHtml(staleText)}</div>
+                        <div class="priority-meta">${escapeHtml(member.email || 'No email')} • ${escapeHtml(source)} • Added ${escapeHtml(formatDate(member.created_at))}</div>
                     </div>
                     <div class="priority-actions">
-                        <span class="status-badge ${app.display_status || 'new'}">${escapeHtml(stageInfo.text)}</span>
-                        <button class="btn btn-secondary btn-sm" type="button" onclick="viewApplication('${app.id}')">Open</button>
+                        <button class="btn btn-secondary btn-sm" type="button" onclick="viewMember('${member.id}')">Open</button>
                     </div>
                 </div>
             `;
         }).join('');
     } catch (error) {
-        console.error('Error loading priority queue:', error);
-        queue.innerHTML = '<p class="muted-inline">Could not load priority queue.</p>';
+        console.error('Error loading recent people:', error);
+        list.innerHTML = '<p class="muted-inline">Could not load recent people.</p>';
     }
 }
 
@@ -616,6 +665,7 @@ function formatActivityText(activity) {
 
 function renderStatusChart(status) {
     const chart = document.getElementById('status-chart');
+    if (!chart) return;
     const total = (status.pending || 0) + (status.in_progress || 0) + (status.completed || 0);
 
     if (total === 0) {
@@ -924,53 +974,139 @@ function renderApplicationsTable() {
     tbody.innerHTML = rows.join('');
 }
 
-function renderPipelineSummaryCards(data) {
-    const container = document.getElementById('pipeline-summary-cards');
-    if (!container) return;
-
-    const statusCounts = data?.status_counts || {};
-    const cards = [
-        { label: 'Truly New', value: Number(data?.truly_new_count || 0), tone: 'new' },
-        { label: 'Reviewed', value: Number(statusCounts.reviewed || 0), tone: 'reviewed' },
-        { label: 'Approved', value: Number(statusCounts.approved || 0), tone: 'approved' },
-        { label: 'Rejected', value: Number(statusCounts.rejected || 0), tone: 'rejected' },
-        { label: 'Total Typeform', value: Number(data?.total || 0), tone: 'total' }
-    ];
-
-    container.innerHTML = cards.map(card => `
-        <div class="pipeline-summary-card ${card.tone}">
-            <div class="pipeline-summary-value">${card.value}</div>
-            <div class="pipeline-summary-label">${card.label}</div>
-        </div>
-    `).join('');
-}
-
 // Applications
 async function loadApplications() {
-    const tbody = document.getElementById('applications-tbody');
-    tbody.innerHTML = '<tr><td colspan="7" class="loading">Loading...</td></tr>';
+    const board = document.getElementById('pipeline-kanban-board');
+    if (board) {
+        board.innerHTML = '<div class="loading">Loading pipeline...</div>';
+    }
 
     try {
         const search = document.getElementById('applications-search')?.value || '';
-        const status = document.getElementById('applications-filter')?.value || '';
 
         const params = new URLSearchParams({
-            limit: pageSize,
-            offset: applicationsPage * pageSize
+            limit: listFetchLimit,
+            offset: 0
         });
         if (search) params.append('search', search);
-        if (status) params.append('status', status);
 
         const data = await fetchAPI(`/applications?${params}`);
         applicationsLastResponse = data;
-        renderPipelineSummaryCards(data);
-
-        initApplicationsTableUX();
-        renderApplicationsTable();
-        renderPagination('applications', data.total, applicationsPage);
+        renderPipelineKanban();
     } catch (error) {
         console.error('Error loading applications:', error);
-        tbody.innerHTML = '<tr><td colspan="7" class="loading">Error loading applications</td></tr>';
+        if (board) {
+            board.innerHTML = '<div class="loading">Error loading pipeline</div>';
+        }
+    }
+}
+
+function renderPipelineKanban() {
+    const board = document.getElementById('pipeline-kanban-board');
+    if (!board) return;
+
+    const apps = applicationsLastResponse?.applications || [];
+    const grouped = apps.reduce((acc, app) => {
+        const stage = app.display_status || 'new';
+        if (!acc[stage]) acc[stage] = [];
+        acc[stage].push(app);
+        return acc;
+    }, {});
+
+    const knownStageSet = new Set(pipelineStageOrder);
+    const extraStages = Object.keys(grouped).filter(stage => !knownStageSet.has(stage)).sort();
+    const stagesToRender = [...pipelineStageOrder, ...extraStages];
+
+    const columns = stagesToRender.map(stage => {
+        const stageApps = (grouped[stage] || []).sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+        const cards = stageApps.map(app => {
+            const name = `${app.first_name || ''} ${app.last_name || ''}`.trim() || 'Unknown';
+            const email = app.email || '-';
+            const revenue = app.annual_revenue || '-';
+            const notes = Number(app.note_count || 0);
+            const created = formatDate(app.created_at);
+            return `
+                <article class="kanban-card" draggable="true" data-application-id="${app.id}" data-stage="${stage}" onclick="viewApplication('${app.id}')">
+                    <div class="kanban-card-title">${escapeHtml(name)}</div>
+                    <div class="kanban-card-meta">${escapeHtml(email)}</div>
+                    <div class="kanban-card-meta">${escapeHtml(revenue)} • ${escapeHtml(created)}</div>
+                    <div class="kanban-card-footer">
+                        <span class="kanban-note-pill">${notes} note${notes === 1 ? '' : 's'}</span>
+                        <button class="btn btn-secondary btn-sm" type="button" onclick="event.stopPropagation(); viewApplication('${app.id}')">View Data</button>
+                    </div>
+                </article>
+            `;
+        }).join('');
+
+        return `
+            <section class="kanban-column" data-stage="${stage}">
+                <header class="kanban-column-header">
+                    <h4>${escapeHtml(pipelineStageLabels[stage] || stage)}</h4>
+                    <span class="kanban-count">${stageApps.length}</span>
+                </header>
+                <div class="kanban-dropzone" data-stage="${stage}">
+                    ${cards || '<div class="kanban-empty">Drop here</div>'}
+                </div>
+            </section>
+        `;
+    }).join('');
+
+    board.innerHTML = columns;
+    setupKanbanDnD();
+}
+
+function setupKanbanDnD() {
+    document.querySelectorAll('.kanban-card').forEach(card => {
+        card.addEventListener('dragstart', (event) => {
+            const appId = card.dataset.applicationId;
+            const stage = card.dataset.stage;
+            event.dataTransfer.setData('text/plain', JSON.stringify({ appId, stage }));
+            event.dataTransfer.effectAllowed = 'move';
+            card.classList.add('dragging');
+        });
+        card.addEventListener('dragend', () => {
+            card.classList.remove('dragging');
+            document.querySelectorAll('.kanban-dropzone').forEach(zone => zone.classList.remove('drag-over'));
+        });
+    });
+
+    document.querySelectorAll('.kanban-dropzone').forEach(zone => {
+        zone.addEventListener('dragover', (event) => {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = 'move';
+            zone.classList.add('drag-over');
+        });
+        zone.addEventListener('dragleave', () => {
+            zone.classList.remove('drag-over');
+        });
+        zone.addEventListener('drop', async (event) => {
+            event.preventDefault();
+            zone.classList.remove('drag-over');
+            try {
+                const payload = JSON.parse(event.dataTransfer.getData('text/plain') || '{}');
+                const appId = payload.appId;
+                const sourceStage = payload.stage;
+                const targetStage = zone.dataset.stage;
+                if (!appId || !targetStage || sourceStage === targetStage) return;
+                await updateApplicationPipelineStage(appId, targetStage);
+            } catch (error) {
+                console.error('Kanban drop parse error:', error);
+            }
+        });
+    });
+}
+
+async function updateApplicationPipelineStage(id, stage) {
+    try {
+        await fetchAPI(`/applications/${id}/pipeline-stage`, {
+            method: 'PUT',
+            body: JSON.stringify({ stage })
+        });
+        showToast(`Moved to ${pipelineStageLabels[stage] || stage}`, 'success');
+        loadApplications();
+        loadOverview();
+    } catch (error) {
+        showToast(error.message || 'Failed to move pipeline stage', 'error');
     }
 }
 
@@ -1008,56 +1144,39 @@ async function viewApplication(id, options = {}) {
             </section>
         `;
 
-        const typeformSections = [
-            detailSection('Contact', [
-                detailRow('Name', safeText(`${app.first_name || ''} ${app.last_name || ''}`.trim() || '-')),
-                detailRow('Email', safeText(app.email)),
-                detailRow('Phone', safeText(app.phone)),
-                detailRow('Best Way to Reach', safeText(app.contact_preference))
-            ]),
-            detailSection('Business Snapshot', [
-                detailRow('Business Description', safeText(app.business_description)),
-                detailRow('Annual Revenue', safeText(app.annual_revenue)),
-                detailRow('Revenue Trend', safeText(app.revenue_trend))
-            ]),
-            detailSection('Decision & Fit', [
-                detailRow('Why CA Pro', safeText(app.why_ca_pro)),
-                detailRow('Investment Readiness', safeText(app.investment_readiness)),
-                detailRow('Decision Timeline', safeText(app.decision_timeline)),
-                detailRow('Has Team', safeText(app.has_team)),
-                detailRow('Referral Source', safeText(app.referral_source)),
-                detailRow('Anything Else', safeText(app.anything_else || app.additional_info))
-            ]),
-            detailSection('Status', [
-                detailRow(
-                    'Pipeline Stage',
-                    `<span class="status-badge ${escapeHtml(app.display_status || 'new')}">${escapeHtml(statusInfo.text)}</span>${statusInfo.time ? `<span class="status-time-inline">${escapeHtml(statusInfo.time)}</span>` : ''}`
-                ),
-                detailRow(
-                    'Review Status',
-                    `<select class="inline-status-select app-review-select" onchange="event.stopPropagation(); updateApplicationStatus('${id}', this.value)">
-                        <option value="new" ${app.status === 'new' ? 'selected' : ''}>Unreviewed</option>
-                        <option value="reviewed" ${app.status === 'reviewed' ? 'selected' : ''}>Reviewed</option>
-                        <option value="approved" ${app.status === 'approved' ? 'selected' : ''}>Approved</option>
-                        <option value="rejected" ${app.status === 'rejected' ? 'selected' : ''}>Rejected</option>
-                    </select>`
-                ),
-                detailRow('Applied', safeText(formatDate(app.created_at))),
-                ...(app.emailed_at ? [detailRow('Emailed', safeText(formatDate(app.emailed_at)))] : []),
-                ...(app.replied_at ? [detailRow('Replied', safeText(formatDate(app.replied_at)))] : []),
-                ...(app.call_booked_at ? [detailRow('Call Booked', safeText(formatDate(app.call_booked_at)))] : []),
-                ...(app.purchased_at ? [detailRow('Purchased', safeText(formatDate(app.purchased_at)))] : []),
-                ...(app.onboarding_started_at ? [detailRow('Chat Started', safeText(formatDate(app.onboarding_started_at)))] : []),
-                ...(app.onboarding_completed_at ? [detailRow('Chat Complete', safeText(formatDate(app.onboarding_completed_at)))] : []),
-                ...(app.whatsapp_joined_at ? [detailRow('WhatsApp Joined', safeText(formatDate(app.whatsapp_joined_at)))] : []),
-                ...(app.cancellation_id ? [
-                    detailRow('Cancellation', `<span class="status-badge rejected">Canceled</span><span class="status-time-inline">${safeText(formatDate(app.cancellation_created_at))}</span>`),
-                    detailRow('Cancellation Reason', safeText(app.cancellation_reason))
-                ] : [])
-            ])
+        const typeformRows = [
+            detailRow('Name', safeText(`${app.first_name || ''} ${app.last_name || ''}`.trim() || '-')),
+            detailRow('Email', safeText(app.email)),
+            detailRow('Phone', safeText(app.phone)),
+            detailRow('Best Way to Reach', safeText(app.contact_preference)),
+            detailRow('Business Description', safeText(app.business_description)),
+            detailRow('Annual Revenue', safeText(app.annual_revenue)),
+            detailRow('Revenue Trend', safeText(app.revenue_trend)),
+            detailRow('Why CA Pro', safeText(app.why_ca_pro)),
+            detailRow('Investment Readiness', safeText(app.investment_readiness)),
+            detailRow('Decision Timeline', safeText(app.decision_timeline)),
+            detailRow('Has Team', safeText(app.has_team)),
+            detailRow('Referral Source', safeText(app.referral_source)),
+            detailRow('Anything Else', safeText(app.anything_else || app.additional_info)),
+            detailRow(
+                'Pipeline Stage',
+                `<span class="status-badge ${escapeHtml(app.display_status || 'new')}">${escapeHtml(statusInfo.text)}</span>${statusInfo.time ? `<span class="status-time-inline">${escapeHtml(statusInfo.time)}</span>` : ''}`
+            ),
+            detailRow('Applied', safeText(formatDate(app.created_at))),
+            ...(app.emailed_at ? [detailRow('Emailed', safeText(formatDate(app.emailed_at)))] : []),
+            ...(app.replied_at ? [detailRow('Replied', safeText(formatDate(app.replied_at)))] : []),
+            ...(app.call_booked_at ? [detailRow('Call Booked', safeText(formatDate(app.call_booked_at)))] : []),
+            ...(app.purchased_at ? [detailRow('Purchased', safeText(formatDate(app.purchased_at)))] : []),
+            ...(app.onboarding_started_at ? [detailRow('Chat Started', safeText(formatDate(app.onboarding_started_at)))] : []),
+            ...(app.onboarding_completed_at ? [detailRow('Chat Complete', safeText(formatDate(app.onboarding_completed_at)))] : []),
+            ...(app.whatsapp_joined_at ? [detailRow('WhatsApp Joined', safeText(formatDate(app.whatsapp_joined_at)))] : []),
+            ...(app.cancellation_id ? [
+                detailRow('Cancellation', `<span class="status-badge rejected">Canceled</span><span class="status-time-inline">${safeText(formatDate(app.cancellation_created_at))}</span>`),
+                detailRow('Cancellation Reason', safeText(app.cancellation_reason))
+            ] : [])
         ];
 
-        const overviewHtml = typeformSections.join('');
+        const overviewHtml = typeformRows.join('');
 
         const notesHtml = `
             ${renderNotesSection(notes, id)}
@@ -1116,18 +1235,6 @@ async function viewApplication(id, options = {}) {
             ].join('');
         }
 
-        const rawData = {
-            typeform: app.raw_data || {},
-            onboarding: app.onboarding_data || null
-        };
-        const rawHtml = `
-            <pre style="background: var(--gray-50); padding: 16px; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; border: 1px solid var(--gray-200);">${escapeHtml(JSON.stringify(rawData, null, 2))}</pre>
-        `;
-
-        const convertButton = app.business_owner_id
-            ? '<button class="btn btn-secondary btn-sm" type="button" disabled>Already a Member</button>'
-            : `<button class="btn btn-primary btn-sm" type="button" onclick="convertApplication('${id}')">Convert to Member</button>`;
-
         panelState.activeTabId = activeTab;
         openItemPanel({
             title,
@@ -1135,10 +1242,9 @@ async function viewApplication(id, options = {}) {
             tabs: [
                 { id: 'typeform', label: 'Typeform', content: overviewHtml },
                 { id: 'onboarding', label: app.onboarding_submission_id ? 'Onboarding Chat' : 'Onboarding Chat (None)', content: onboardingHtml },
-                { id: 'notes', label: `Notes (${notes.length})`, content: notesHtml },
-                { id: 'raw', label: 'Raw JSON', content: rawHtml }
+                { id: 'notes', label: `Notes (${notes.length})`, content: notesHtml }
             ],
-            footer: convertButton
+            footer: ''
         });
     } catch (error) {
         showToast('Failed to load application details', 'error');
@@ -1363,95 +1469,61 @@ function renderMembersTable() {
         return;
     }
 
-    const groups = members.reduce((acc, m) => {
-        const status = m.onboarding_status || 'pending';
-        (acc[status] ||= []).push(m);
-        return acc;
-    }, {});
+    const sorted = [...members].sort(compareMembers);
+    tbody.innerHTML = sorted.map(member => {
+        const name = `${member.first_name || ''} ${member.last_name || ''}`.trim() || '-';
+        const business = member.business_name || '-';
+        const email = member.email || '-';
+        const revenue = member.annual_revenue || '-';
+        const teamCount = Number(member.team_member_count || 0);
+        const status = member.onboarding_status || 'pending';
 
-    const ordered = getMembersStatusOrder();
-    const unknown = Object.keys(groups).filter(k => !ordered.includes(k)).sort();
-    const statusesToRender = [...ordered, ...unknown].filter(k => (groups[k] || []).length > 0);
-
-    const rows = [];
-
-    for (const statusKey of statusesToRender) {
-        const groupMembers = groups[statusKey] || [];
-        const collapsed = !!membersGroupCollapsed[statusKey];
-
-        rows.push(`
-            <tr class="group-header-row">
-                <td colspan="7">
-                    <div class="group-row">
-                        <button class="group-toggle" type="button" onclick="toggleMembersGroup('${statusKey}')">${collapsed ? '▸' : '▾'}</button>
-                        <span class="group-color ${statusKey}"></span>
-                        <span>${escapeHtml(getMemberStatusLabel(statusKey))}</span>
-                        <span class="group-count">${groupMembers.length}</span>
+        return `
+            <tr class="clickable-row" onclick="viewMember('${member.id}')">
+                <td><strong>${escapeHtml(name)}</strong></td>
+                <td>${escapeHtml(business)}</td>
+                <td>${escapeHtml(email)}</td>
+                <td>${escapeHtml(revenue)}</td>
+                <td>${teamCount}</td>
+                <td>
+                    <select class="inline-status-select member-status ${status}"
+                            onclick="event.stopPropagation()"
+                            onchange="event.stopPropagation(); this.className = 'inline-status-select member-status ' + this.value; updateMemberOnboardingStatus('${member.id}', this.value)">
+                        <option value="pending" ${status === 'pending' ? 'selected' : ''}>Pending</option>
+                        <option value="in_progress" ${status === 'in_progress' ? 'selected' : ''}>In Progress</option>
+                        <option value="completed" ${status === 'completed' ? 'selected' : ''}>Completed</option>
+                    </select>
+                </td>
+                <td>
+                    <div class="kebab-menu">
+                        <button class="kebab-btn" onclick="toggleKebabMenu(event, 'member-${member.id}')">
+                            <svg viewBox="0 0 24 24" fill="currentColor">
+                                <circle cx="12" cy="5" r="2"/>
+                                <circle cx="12" cy="12" r="2"/>
+                                <circle cx="12" cy="19" r="2"/>
+                            </svg>
+                        </button>
+                        <div class="kebab-dropdown" id="kebab-member-${member.id}">
+                            <button class="kebab-dropdown-item" onclick="event.stopPropagation(); viewMember('${member.id}')">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                                    <circle cx="12" cy="12" r="3"/>
+                                </svg>
+                                View Data
+                            </button>
+                            <button class="kebab-dropdown-item danger" onclick="event.stopPropagation(); deleteMember('${member.id}')">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="3 6 5 6 21 6"/>
+                                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                </svg>
+                                Delete
+                            </button>
+                        </div>
                     </div>
                 </td>
             </tr>
-        `);
-
-        if (collapsed) continue;
-
-        const sorted = [...groupMembers].sort(compareMembers);
-        rows.push(sorted.map(member => {
-            const name = `${member.first_name || ''} ${member.last_name || ''}`.trim() || '-';
-            const business = member.business_name || '-';
-            const email = member.email || '-';
-            const revenue = member.annual_revenue || '-';
-            const teamCount = Number(member.team_member_count || 0);
-            const status = member.onboarding_status || 'pending';
-
-            return `
-                <tr class="clickable-row" onclick="viewMember('${member.id}')">
-                    <td><strong>${escapeHtml(name)}</strong></td>
-                    <td>${escapeHtml(business)}</td>
-                    <td>${escapeHtml(email)}</td>
-                    <td>${escapeHtml(revenue)}</td>
-                    <td>${teamCount}</td>
-                    <td>
-                        <select class="inline-status-select member-status ${status}"
-                                onclick="event.stopPropagation()"
-                                onchange="event.stopPropagation(); this.className = 'inline-status-select member-status ' + this.value; updateMemberOnboardingStatus('${member.id}', this.value)">
-                            <option value="pending" ${status === 'pending' ? 'selected' : ''}>Pending</option>
-                            <option value="in_progress" ${status === 'in_progress' ? 'selected' : ''}>In Progress</option>
-                            <option value="completed" ${status === 'completed' ? 'selected' : ''}>Completed</option>
-                        </select>
-                    </td>
-                    <td>
-                        <div class="kebab-menu">
-                            <button class="kebab-btn" onclick="toggleKebabMenu(event, 'member-${member.id}')">
-                                <svg viewBox="0 0 24 24" fill="currentColor">
-                                    <circle cx="12" cy="5" r="2"/>
-                                    <circle cx="12" cy="12" r="2"/>
-                                    <circle cx="12" cy="19" r="2"/>
-                                </svg>
-                            </button>
-                            <div class="kebab-dropdown" id="kebab-member-${member.id}">
-                                <button class="kebab-dropdown-item" onclick="event.stopPropagation(); viewMember('${member.id}')">
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-                                        <circle cx="12" cy="12" r="3"/>
-                                    </svg>
-                                    View Data
-                                </button>
-                                <button class="kebab-dropdown-item danger" onclick="event.stopPropagation(); deleteMember('${member.id}')">
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                        <polyline points="3 6 5 6 21 6"/>
-                                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-                                    </svg>
-                                    Delete
-                                </button>
-                            </div>
-                        </div>
-                    </td>
-                </tr>
-            `;
-        }).join(''));
-    }
-
-    tbody.innerHTML = rows.join('');
+        `;
+    }).join('');
 }
 
 // Members
@@ -1463,21 +1535,16 @@ async function loadMembers() {
         initMembersTableUX();
 
         const search = document.getElementById('members-search')?.value || '';
-        const source = document.getElementById('members-source-filter')?.value || '';
-        const status = document.getElementById('members-status-filter')?.value || '';
 
         const params = new URLSearchParams({
-            limit: pageSize,
-            offset: membersPage * pageSize
+            limit: listFetchLimit,
+            offset: 0
         });
         if (search) params.append('search', search);
-        if (source) params.append('source', source);
-        if (status) params.append('status', status);
 
         const data = await fetchAPI(`/members?${params}`);
         membersLastResponse = data;
         renderMembersTable();
-        renderPagination('members', data.total, membersPage);
     } catch (error) {
         console.error('Error loading members:', error);
         tbody.innerHTML = '<tr><td colspan="7" class="loading">Error loading members</td></tr>';
@@ -1752,92 +1819,55 @@ function renderTeamMembersTable() {
         return;
     }
 
-    const groups = members.reduce((acc, tm) => {
-        const company = (tm.business_name || '').trim() || 'No Company';
-        (acc[company] ||= []).push(tm);
-        return acc;
-    }, {});
+    const sorted = [...members].sort(compareTeamMembers);
+    tbody.innerHTML = sorted.map(tm => {
+        const name = `${tm.first_name || ''} ${tm.last_name || ''}`.trim() || '-';
+        const role = tm.role || tm.title || '-';
+        const companyName = tm.business_name || '-';
 
-    const groupNames = Object.keys(groups).sort((a, b) => {
-        if (a === 'No Company') return -1;
-        if (b === 'No Company') return 1;
-        return a.localeCompare(b);
-    });
-
-    const rows = [];
-
-    for (const company of groupNames) {
-        const groupMembers = groups[company] || [];
-        const collapsed = !!teamMembersGroupCollapsed[company];
-        const color = pickGroupColor(company);
-
-        rows.push(`
-            <tr class="group-header-row">
-                <td colspan="6">
-                    <div class="group-row">
-                        <button class="group-toggle" type="button" onclick="toggleTeamMembersGroup('${encodeURIComponent(company)}')">${collapsed ? '▸' : '▾'}</button>
-                        <span class="group-color" style="background: ${color};"></span>
-                        <span>${escapeHtml(company)}</span>
-                        <span class="group-count">${groupMembers.length}</span>
+        return `
+            <tr class="clickable-row" onclick="viewTeamMember('${tm.id}')">
+                <td><strong>${escapeHtml(name)}</strong></td>
+                <td>${escapeHtml(tm.email || '-')}</td>
+                <td>${escapeHtml(role)}</td>
+                <td>${escapeHtml(companyName)}</td>
+                <td>
+                    <div class="skills-display">
+                        ${tm.copywriting_skill ? `<span class="skill-badge">Copy: ${tm.copywriting_skill}</span>` : ''}
+                        ${tm.cro_skill ? `<span class="skill-badge">CRO: ${tm.cro_skill}</span>` : ''}
+                        ${tm.ai_skill ? `<span class="skill-badge">AI: ${tm.ai_skill}</span>` : ''}
+                    </div>
+                </td>
+                <td>
+                    <div class="kebab-menu">
+                        <button class="kebab-btn" onclick="toggleKebabMenu(event, 'tm-${tm.id}')">
+                            <svg viewBox="0 0 24 24" fill="currentColor">
+                                <circle cx="12" cy="5" r="2"/>
+                                <circle cx="12" cy="12" r="2"/>
+                                <circle cx="12" cy="19" r="2"/>
+                            </svg>
+                        </button>
+                        <div class="kebab-dropdown" id="kebab-tm-${tm.id}">
+                            <button class="kebab-dropdown-item" onclick="event.stopPropagation(); viewTeamMember('${tm.id}')">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                                    <circle cx="12" cy="12" r="3"/>
+                                </svg>
+                                View Data
+                            </button>
+                            <button class="kebab-dropdown-item danger" onclick="event.stopPropagation(); deleteTeamMember('${tm.id}')">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="3 6 5 6 21 6"/>
+                                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                </svg>
+                                Delete
+                            </button>
+                        </div>
                     </div>
                 </td>
             </tr>
-        `);
-
-        if (collapsed) continue;
-
-        const sorted = [...groupMembers].sort(compareTeamMembers);
-        rows.push(sorted.map(tm => {
-            const name = `${tm.first_name || ''} ${tm.last_name || ''}`.trim() || '-';
-            const role = tm.role || tm.title || '-';
-            const companyName = tm.business_name || '-';
-
-            return `
-                <tr class="clickable-row" onclick="viewTeamMember('${tm.id}')">
-                    <td><strong>${escapeHtml(name)}</strong></td>
-                    <td>${escapeHtml(tm.email || '-')}</td>
-                    <td>${escapeHtml(role)}</td>
-                    <td>${escapeHtml(companyName)}</td>
-                    <td>
-                        <div class="skills-display">
-                            ${tm.copywriting_skill ? `<span class="skill-badge">Copy: ${tm.copywriting_skill}</span>` : ''}
-                            ${tm.cro_skill ? `<span class="skill-badge">CRO: ${tm.cro_skill}</span>` : ''}
-                            ${tm.ai_skill ? `<span class="skill-badge">AI: ${tm.ai_skill}</span>` : ''}
-                        </div>
-                    </td>
-                    <td>
-                        <div class="kebab-menu">
-                            <button class="kebab-btn" onclick="toggleKebabMenu(event, 'tm-${tm.id}')">
-                                <svg viewBox="0 0 24 24" fill="currentColor">
-                                    <circle cx="12" cy="5" r="2"/>
-                                    <circle cx="12" cy="12" r="2"/>
-                                    <circle cx="12" cy="19" r="2"/>
-                                </svg>
-                            </button>
-                            <div class="kebab-dropdown" id="kebab-tm-${tm.id}">
-                                <button class="kebab-dropdown-item" onclick="event.stopPropagation(); viewTeamMember('${tm.id}')">
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-                                        <circle cx="12" cy="12" r="3"/>
-                                    </svg>
-                                    View Data
-                                </button>
-                                <button class="kebab-dropdown-item danger" onclick="event.stopPropagation(); deleteTeamMember('${tm.id}')">
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                        <polyline points="3 6 5 6 21 6"/>
-                                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-                                    </svg>
-                                    Delete
-                                </button>
-                            </div>
-                        </div>
-                    </td>
-                </tr>
-            `;
-        }).join(''));
-    }
-
-    tbody.innerHTML = rows.join('');
+        `;
+    }).join('');
 }
 
 // Team Members
@@ -1851,15 +1881,14 @@ async function loadTeamMembers() {
         const search = document.getElementById('team-members-search')?.value || '';
 
         const params = new URLSearchParams({
-            limit: pageSize,
-            offset: teamMembersPage * pageSize
+            limit: listFetchLimit,
+            offset: 0
         });
         if (search) params.append('search', search);
 
         const data = await fetchAPI(`/team-members?${params}`);
         teamMembersLastResponse = data;
         renderTeamMembersTable();
-        renderPagination('team-members', Number(data.total || 0), teamMembersPage);
     } catch (error) {
         console.error('Error loading team members:', error);
         tbody.innerHTML = '<tr><td colspan="6" class="loading">Error loading team members</td></tr>';
@@ -1903,7 +1932,7 @@ function renderCancellationsTable(rows) {
         <tr>
             <td>${escapeHtml(item.member_name || '-')}</td>
             <td>${escapeHtml(item.member_email || '-')}</td>
-            <td>${escapeHtml(item.reason || '-')}</td>
+            <td class="cancellation-reason-cell">${escapeHtml(item.reason || '-')}</td>
             <td>${escapeHtml(item.source || '-')}</td>
             <td>${formatDate(item.created_at)}</td>
         </tr>
@@ -1973,7 +2002,6 @@ async function viewTeamMember(id) {
 
 // Onboarding
 async function loadOnboarding() {
-    const statsDiv = document.getElementById('onboarding-stats');
     const tbody = document.getElementById('submissions-tbody');
 
     try {
@@ -1981,36 +2009,11 @@ async function loadOnboarding() {
 
         // Get filter values
         const search = document.getElementById('submissions-search')?.value || '';
-        const completeFilter = document.getElementById('submissions-filter')?.value || '';
 
         // Build query params
-        const params = new URLSearchParams({ limit: 50 });
+        const params = new URLSearchParams({ limit: listFetchLimit, offset: 0 });
         if (search) params.append('search', search);
-        if (completeFilter !== '') params.append('complete', completeFilter);
-
-        const [status, submissions] = await Promise.all([
-            fetchAPI('/onboarding/status'),
-            fetchAPI(`/onboarding/submissions?${params}`)
-        ]);
-
-        // Render stats - show both member status and submission counts
-        const memberStatus = status.member_status || {};
-        const subCounts = status.submissions || submissions.counts || {};
-
-        statsDiv.innerHTML = `
-            <div class="onboarding-stat pending">
-                <div class="onboarding-stat-value">${memberStatus.pending || 0}</div>
-                <div class="onboarding-stat-label">Members Pending</div>
-            </div>
-            <div class="onboarding-stat in-progress">
-                <div class="onboarding-stat-value">${subCounts.incomplete || 0}</div>
-                <div class="onboarding-stat-label">Incomplete Submissions</div>
-            </div>
-            <div class="onboarding-stat completed">
-                <div class="onboarding-stat-value">${subCounts.complete || 0}</div>
-                <div class="onboarding-stat-label">Complete Submissions</div>
-            </div>
-        `;
+        const submissions = await fetchAPI(`/onboarding/submissions?${params}`);
 
         // Render submissions with progress info
         if (submissions.submissions.length === 0) {
@@ -2025,7 +2028,7 @@ async function loadOnboarding() {
 
                 // Show name if matched to business owner, otherwise show session ID
                 const memberName = [sub.first_name, sub.last_name].filter(Boolean).join(' ');
-                const displayName = memberName || sessionShort;
+                const displayName = memberName || ((sub.session_id || '').startsWith('session_17702621') ? 'Matthew Potts' : sessionShort);
                 const displayTitle = memberName ? `${memberName} (${sub.session_id || ''})` : (sub.session_id || '');
 
                 return `
@@ -2699,6 +2702,8 @@ window.deleteApplication = deleteApplication;
 window.submitNote = submitNote;
 window.openNotesPanel = openNotesPanel;
 window.submitInlineNote = submitInlineNote;
+window.openSearchResultApplication = openSearchResultApplication;
+window.openSearchResultMember = openSearchResultMember;
 
 // Open notes panel inline
 async function openNotesPanel(applicationId, applicantName) {
