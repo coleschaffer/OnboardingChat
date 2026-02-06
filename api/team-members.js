@@ -119,8 +119,23 @@ router.post('/', async (req, res) => {
     const {
       business_owner_id, first_name, last_name, email, phone, role, title,
       copywriting_skill, cro_skill, ai_skill, business_summary, responsibilities,
-      source = 'chat_onboarding'
+      source = 'chat_onboarding',
+      request_sync = false
     } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+
+    if (business_owner_id) {
+      const existing = await pool.query(
+        `SELECT id FROM team_members WHERE business_owner_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`,
+        [business_owner_id, email]
+      );
+      if (existing.rows.length > 0) {
+        return res.status(400).json({ error: 'Team member already exists for this business owner' });
+      }
+    }
 
     const result = await pool.query(`
       INSERT INTO team_members (
@@ -133,13 +148,38 @@ router.post('/', async (req, res) => {
       copywriting_skill, cro_skill, ai_skill, business_summary, responsibilities, source
     ]);
 
+    let created = result.rows[0];
+
+    // Optionally flag this team member for cron-based sync to Circle/WhatsApp/Monday.
+    // We keep this as a best-effort update so it won't break if migrations haven't run yet.
+    if (request_sync) {
+      try {
+        const updated = await pool.query(
+          `UPDATE team_members
+           SET sync_requested_at = NOW(),
+               sync_attempts = 0,
+               last_sync_attempt_at = NULL,
+               last_sync_error = NULL,
+               circle_synced_at = NULL,
+               whatsapp_synced_at = NULL,
+               monday_synced_at = NULL
+           WHERE id = $1
+           RETURNING *`,
+          [created.id]
+        );
+        if (updated.rows[0]) created = updated.rows[0];
+      } catch (err) {
+        console.error('[Team Members] Failed to set sync_requested_at:', err.message);
+      }
+    }
+
     // Log activity
     await pool.query(`
       INSERT INTO activity_log (action, entity_type, entity_id, details)
       VALUES ($1, $2, $3, $4)
     `, ['team_member_created', 'team_member', result.rows[0].id, JSON.stringify({ name: `${first_name} ${last_name}`, role })]);
 
-    res.status(201).json(result.rows[0]);
+    res.status(201).json(created);
   } catch (error) {
     console.error('Error creating team member:', error);
     res.status(500).json({ error: 'Failed to create team member' });

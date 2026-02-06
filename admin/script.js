@@ -1558,18 +1558,60 @@ async function viewMember(id) {
         const member = await fetchAPI(`/members/${id}/unified`);
 
         // Team members section
-        let teamHtml = '';
-        if (member.team_members && member.team_members.length > 0) {
-            teamHtml = `
-                <h4 style="margin-top: 20px; margin-bottom: 12px; font-size: 0.9rem; color: var(--gray-600);">👥 Team Members</h4>
-                ${member.team_members.map(tm => `
+        const teamMembers = Array.isArray(member.team_members) ? member.team_members : [];
+        const teamListHtml = teamMembers.length > 0
+            ? teamMembers.map(tm => {
+                const fullName = [tm.first_name, tm.last_name].filter(Boolean).join(' ').trim() || tm.email || 'Team Member';
+                const roleLabel = tm.role || tm.title || 'N/A';
+                const syncRequested = !!tm.sync_requested_at;
+                const syncComplete = syncRequested && tm.circle_synced_at && tm.whatsapp_synced_at && tm.monday_synced_at;
+                const syncPending = syncRequested && !syncComplete;
+                const syncBadge = syncPending
+                    ? `<span class="status-badge pending" style="margin-left: 8px;">Sync pending</span>`
+                    : (syncComplete ? `<span class="status-badge completed" style="margin-left: 8px;">Synced</span>` : '');
+
+                return `
                     <div style="background: var(--gray-50); padding: 10px; border-radius: 6px; margin-bottom: 8px;">
-                        <strong>${tm.first_name} ${tm.last_name}</strong> - ${tm.role || tm.title || 'N/A'}<br>
-                        <small style="color: var(--gray-500);">${tm.email}</small>
+                        <div style="display:flex; align-items:center; justify-content: space-between; gap: 10px;">
+                            <div>
+                                <strong>${escapeHtml(fullName)}</strong>${syncBadge}<br>
+                                <small style="color: var(--gray-500);">${escapeHtml(tm.email || '-')}</small>
+                            </div>
+                            <div style="color: var(--gray-600); font-size: 0.85rem; text-align: right;">${escapeHtml(roleLabel)}</div>
+                        </div>
                     </div>
-                `).join('')}
-            `;
-        }
+                `;
+            }).join('')
+            : `<div style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 8px;">No team members yet.</div>`;
+
+        const addTeamMemberHtml = `
+            <div class="add-team-member">
+                <div class="add-team-member-header">
+                    <h4 class="add-team-member-title">➕ Add Team Member</h4>
+                    <button class="btn btn-secondary btn-sm" type="button" onclick="toggleAddTeamMemberForm('${member.id}')">Add</button>
+                </div>
+                <form id="add-team-member-form-${member.id}" class="add-team-member-form" onsubmit="event.preventDefault(); createTeamMemberForOwner('${member.id}')">
+                    <div class="add-team-member-grid">
+                        <input id="add-team-member-first-${member.id}" type="text" placeholder="First name" required>
+                        <input id="add-team-member-last-${member.id}" type="text" placeholder="Last name">
+                        <input id="add-team-member-email-${member.id}" type="email" placeholder="Email" required>
+                        <input id="add-team-member-phone-${member.id}" type="tel" placeholder="Phone (for WhatsApp)">
+                        <input id="add-team-member-role-${member.id}" type="text" placeholder="Role (optional)">
+                    </div>
+                    <div class="add-team-member-actions">
+                        <button class="btn btn-primary btn-sm" type="submit">Save</button>
+                        <button class="btn btn-secondary btn-sm" type="button" onclick="toggleAddTeamMemberForm('${member.id}', false)">Cancel</button>
+                    </div>
+                    <div class="add-team-member-hint">Syncs on the next cron run (Circle, WhatsApp, Monday).</div>
+                </form>
+            </div>
+        `;
+
+        const teamHtml = `
+            <h4 style="margin-top: 20px; margin-bottom: 12px; font-size: 0.9rem; color: var(--gray-600);">👥 Team Members</h4>
+            ${teamListHtml}
+            ${addTeamMemberHtml}
+        `;
 
         // Linked Typeform data section
         let typeformHtml = '';
@@ -1679,6 +1721,56 @@ async function viewMember(id) {
         });
     } catch (error) {
         showToast('Failed to load member details', 'error');
+    }
+}
+
+function toggleAddTeamMemberForm(businessOwnerId, force = null) {
+    const form = document.getElementById(`add-team-member-form-${businessOwnerId}`);
+    if (!form) return;
+
+    const shouldOpen = typeof force === 'boolean' ? force : !form.classList.contains('active');
+    form.classList.toggle('active', shouldOpen);
+
+    if (!shouldOpen) {
+        try { form.reset(); } catch (e) {}
+        return;
+    }
+
+    const first = document.getElementById(`add-team-member-first-${businessOwnerId}`);
+    first?.focus();
+}
+
+async function createTeamMemberForOwner(businessOwnerId) {
+    const first = document.getElementById(`add-team-member-first-${businessOwnerId}`)?.value?.trim() || '';
+    const last = document.getElementById(`add-team-member-last-${businessOwnerId}`)?.value?.trim() || '';
+    const email = document.getElementById(`add-team-member-email-${businessOwnerId}`)?.value?.trim() || '';
+    const phone = document.getElementById(`add-team-member-phone-${businessOwnerId}`)?.value?.trim() || '';
+    const role = document.getElementById(`add-team-member-role-${businessOwnerId}`)?.value?.trim() || '';
+
+    if (!email) {
+        showToast('Email is required', 'error');
+        return;
+    }
+
+    try {
+        await fetchAPI('/team-members', {
+            method: 'POST',
+            body: JSON.stringify({
+                business_owner_id: businessOwnerId,
+                first_name: first,
+                last_name: last,
+                email,
+                phone: phone || null,
+                role: role || null,
+                source: 'chat_onboarding',
+                request_sync: true
+            })
+        });
+
+        showToast('Team member added. Sync scheduled on next cron run.', 'success');
+        await viewMember(businessOwnerId);
+    } catch (error) {
+        showToast(error.message || 'Failed to add team member', 'error');
     }
 }
 

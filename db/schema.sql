@@ -54,7 +54,15 @@ CREATE TABLE IF NOT EXISTS team_members (
     business_summary TEXT,
     responsibilities TEXT,
     source VARCHAR(50) DEFAULT 'chat_onboarding' CHECK (source IN ('typeform', 'csv_import', 'chat_onboarding')),
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    -- CRM-added team members can be queued for cron-based sync (Circle/WhatsApp/Monday)
+    sync_requested_at TIMESTAMP WITH TIME ZONE,
+    sync_attempts INTEGER DEFAULT 0,
+    last_sync_attempt_at TIMESTAMP WITH TIME ZONE,
+    last_sync_error TEXT,
+    circle_synced_at TIMESTAMP WITH TIME ZONE,
+    whatsapp_synced_at TIMESTAMP WITH TIME ZONE,
+    monday_synced_at TIMESTAMP WITH TIME ZONE
 );
 
 -- C-Level Partners table (for partner/executive additions)
@@ -141,6 +149,7 @@ CREATE INDEX IF NOT EXISTS idx_business_owners_created ON business_owners(create
 
 CREATE INDEX IF NOT EXISTS idx_team_members_business_owner ON team_members(business_owner_id);
 CREATE INDEX IF NOT EXISTS idx_team_members_email ON team_members(email);
+CREATE INDEX IF NOT EXISTS idx_team_members_sync_requested_at ON team_members(sync_requested_at) WHERE sync_requested_at IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_typeform_applications_status ON typeform_applications(status);
 CREATE INDEX IF NOT EXISTS idx_typeform_applications_created ON typeform_applications(created_at DESC);

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const {
   syncOnboardingToMonday,
+  syncTeamMembersToMonday,
   createBusinessOwnerItem,
   businessOwnerExistsInMonday,
   updateBusinessOwnerCompany,
@@ -10,11 +11,15 @@ const {
   extractColumnText,
   BOARDS
 } = require('./monday');
+const { addMemberToCircle, CIRCLE_CONFIG } = require('./circle');
 const { gmailService } = require('../lib/gmail');
 const { postReplyNotification, postMessage } = require('./slack-threads');
 const { createMemberThread } = require('../lib/member-threads');
 const { parseMoney, formatCurrency, buildGrandfatheredLine } = require('../lib/billing-utils');
 const { DEFAULT_TIMEZONE, getDateKeyInTimeZone, addDaysToDateKey, getDatePartsInTimeZone } = require('../lib/time');
+const { addContactsToGroups, buildWhatsAppAddSummary } = require('../lib/whatsapp-actions');
+const { resolveGroupKeysForRole } = require('../lib/whatsapp-groups');
+const { normalizePhoneForWasender } = require('../lib/wasender-client');
 
 // Helper to convert revenue to generalized format
 function generalizeRevenue(revenue) {
@@ -84,6 +89,50 @@ function buildYearlyTemplates(firstName, amount) {
     emailBody: emailLines.join('\n'),
     whatsappMessage: whatsappLines.join('\n')
   };
+}
+
+function formatPhoneForLabel(phone) {
+  if (!phone) return null;
+  const digits = phone.toString().replace(/\\D/g, '');
+  if (!digits) return null;
+  const normalized = digits.length >= 10 ? digits.slice(-10) : digits;
+  if (normalized.length === 10) {
+    return `${normalized.slice(0, 3)}-${normalized.slice(3, 6)}-${normalized.slice(6)}`;
+  }
+  return normalized;
+}
+
+function buildContactsLabel(contacts, fallbackLabel) {
+  const entries = (contacts || [])
+    .map(contact => {
+      const phoneLabel = formatPhoneForLabel(contact.phone);
+      if (!phoneLabel) return null;
+      const name = contact.name || contact.email || 'Unknown';
+      return `${name} (${phoneLabel})`;
+    })
+    .filter(Boolean);
+
+  if (entries.length === 0) return fallbackLabel;
+  return `${entries.join(', ')} added`;
+}
+
+async function findWelcomeThreadByEmail(pool, email) {
+  if (!email) return null;
+
+  const orderResult = await pool.query(
+    `
+      SELECT slack_channel_id, slack_thread_ts
+      FROM samcart_orders
+      WHERE LOWER(email) = LOWER($1)
+        AND slack_channel_id IS NOT NULL
+        AND slack_thread_ts IS NOT NULL
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    [email]
+  );
+
+  return orderResult.rows[0] || null;
 }
 
 async function runYearlyRenewals({ pool, force = false }) {
@@ -732,6 +781,298 @@ router.post('/process-monday-syncs', async (req, res) => {
   } catch (error) {
     console.error('Error processing Monday syncs:', error);
     res.status(500).json({ error: 'Failed to process Monday syncs' });
+  }
+});
+
+// Process pending Team Member syncs (Circle + WhatsApp + Monday) - called by Railway cron job
+router.post('/process-team-member-syncs', async (req, res) => {
+  try {
+    const secretKey = req.headers['x-cron-secret'] || req.body.secret;
+    const expectedSecret = process.env.CRON_SECRET;
+
+    if (!expectedSecret) {
+      console.error('CRON_SECRET not configured');
+      return res.status(500).json({ error: 'Server not configured for cron jobs' });
+    }
+
+    if (secretKey !== expectedSecret) {
+      console.error('Invalid cron secret provided');
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const pool = req.app.locals.pool;
+    console.log('[Team Member Syncs] Processing pending team member syncs...');
+
+    let pending;
+    try {
+      pending = await pool.query(`
+        SELECT
+          tm.id,
+          tm.business_owner_id,
+          tm.first_name,
+          tm.last_name,
+          tm.email,
+          tm.phone,
+          tm.role,
+          tm.title,
+          tm.sync_requested_at,
+          tm.sync_attempts,
+          tm.last_sync_attempt_at,
+          tm.last_sync_error,
+          tm.circle_synced_at,
+          tm.whatsapp_synced_at,
+          tm.monday_synced_at,
+          bo.email AS owner_email,
+          bo.first_name AS owner_first_name,
+          bo.last_name AS owner_last_name,
+          bo.business_name AS owner_business_name
+        FROM team_members tm
+        LEFT JOIN business_owners bo ON tm.business_owner_id = bo.id
+        WHERE tm.sync_requested_at IS NOT NULL
+          AND tm.business_owner_id IS NOT NULL
+          AND NULLIF(TRIM(tm.email), '') IS NOT NULL
+          AND (
+            tm.circle_synced_at IS NULL OR
+            tm.whatsapp_synced_at IS NULL OR
+            tm.monday_synced_at IS NULL
+          )
+          AND (
+            tm.last_sync_attempt_at IS NULL OR
+            tm.last_sync_attempt_at < NOW() - INTERVAL '10 minutes'
+          )
+        ORDER BY tm.sync_requested_at ASC
+        LIMIT 25
+      `);
+    } catch (error) {
+      // Helpful message if the DB hasn't been migrated yet.
+      if (error.code === '42703') {
+        return res.status(500).json({
+          error: 'Team member sync columns not found in DB. Deploy the latest server migrations first.'
+        });
+      }
+      throw error;
+    }
+
+    console.log(`[Team Member Syncs] Found ${pending.rows.length} team member(s) to process`);
+
+    const results = {
+      processed: 0,
+      completed: 0,
+      circle: { synced: 0, errors: 0 },
+      whatsapp: { synced: 0, skippedMissingPhone: 0, errors: 0 },
+      monday: { synced: 0, errors: 0, deferred: 0 },
+      errors: []
+    };
+
+    for (const row of pending.rows) {
+      results.processed += 1;
+
+      const teamMemberName = [row.first_name, row.last_name].filter(Boolean).join(' ').trim() || row.email || 'Unknown';
+      const teamMember = {
+        name: teamMemberName,
+        email: row.email,
+        phone: row.phone,
+        role: row.role,
+        title: row.title,
+        firstName: row.first_name,
+        lastName: row.last_name
+      };
+
+      const ownerEmail = row.owner_email || null;
+      const ownerName = [row.owner_first_name, row.owner_last_name].filter(Boolean).join(' ').trim() || ownerEmail || 'Business Owner';
+
+      // Stamp attempt (best-effort) so concurrent cron runs don't endlessly re-pick the same rows.
+      try {
+        await pool.query(
+          `
+            UPDATE team_members
+            SET sync_attempts = COALESCE(sync_attempts, 0) + 1,
+                last_sync_attempt_at = NOW()
+            WHERE id = $1
+          `,
+          [row.id]
+        );
+      } catch (e) {
+        console.error('[Team Member Syncs] Failed to update attempt counter:', e.message);
+      }
+
+      const errors = [];
+
+      // Circle sync (CA + SPG)
+      if (!row.circle_synced_at) {
+        try {
+          const name = teamMember.name || teamMember.email;
+
+          const caResult = await addMemberToCircle({
+            community: 'CA',
+            email: teamMember.email,
+            name,
+            accessGroupId: CIRCLE_CONFIG?.CA?.accessGroups?.teamMembers
+          });
+
+          const spgResult = await addMemberToCircle({
+            community: 'SPG',
+            email: teamMember.email,
+            name,
+            accessGroupId: CIRCLE_CONFIG?.SPG?.accessGroups?.teamMembers
+          });
+
+          if (caResult.success && spgResult.success) {
+            await pool.query(`UPDATE team_members SET circle_synced_at = NOW() WHERE id = $1`, [row.id]);
+            results.circle.synced += 1;
+          } else {
+            const errParts = [];
+            if (!caResult.success) errParts.push(`CA: ${caResult.error || 'error'}`);
+            if (!spgResult.success) errParts.push(`SPG: ${spgResult.error || 'error'}`);
+            errors.push(`Circle failed (${errParts.join('; ')})`);
+            results.circle.errors += 1;
+          }
+        } catch (e) {
+          errors.push(`Circle error: ${e.message}`);
+          results.circle.errors += 1;
+        }
+      }
+
+      // WhatsApp sync (add to Team Members group)
+      if (!row.whatsapp_synced_at) {
+        try {
+          const normalizedPhone = normalizePhoneForWasender(teamMember.phone);
+
+          // Missing phone: mark as "done" so we don't retry every cron run.
+          if (!normalizedPhone) {
+            await pool.query(`UPDATE team_members SET whatsapp_synced_at = NOW() WHERE id = $1`, [row.id]);
+            results.whatsapp.skippedMissingPhone += 1;
+
+            const slackThread = ownerEmail ? await findWelcomeThreadByEmail(pool, ownerEmail) : null;
+            if (slackThread?.slack_channel_id && slackThread?.slack_thread_ts && process.env.SLACK_BOT_TOKEN) {
+              const text = `⚠️ WhatsApp add skipped (missing phone)\n*Business Owner:* ${ownerName}\n*Team Member:* ${teamMember.name} (${teamMember.email})`;
+              try {
+                await postMessage(slackThread.slack_channel_id, text, [
+                  { type: 'section', text: { type: 'mrkdwn', text } }
+                ], slackThread.slack_thread_ts);
+              } catch (e) {
+                console.error('[Team Member Syncs] Failed posting WhatsApp skipped note to Slack:', e.message);
+              }
+            }
+          } else {
+            const groupKeys = resolveGroupKeysForRole('team_member');
+            const contacts = [{
+              name: teamMember.name || teamMember.email,
+              email: teamMember.email,
+              phone: teamMember.phone
+            }];
+
+            const addResult = await addContactsToGroups({ contacts, groupKeys });
+            const label = buildContactsLabel(contacts, 'Team member added');
+            const summaryText = buildWhatsAppAddSummary({
+              label,
+              groupResults: addResult.groupResults,
+              participantsCount: addResult.participants.length,
+              skipped: addResult.skipped,
+              missingGroupKeys: addResult.missingGroupKeys
+            });
+
+            const slackThread = ownerEmail ? await findWelcomeThreadByEmail(pool, ownerEmail) : null;
+            if (slackThread?.slack_channel_id && slackThread?.slack_thread_ts && process.env.SLACK_BOT_TOKEN) {
+              try {
+                await postMessage(slackThread.slack_channel_id, summaryText, [
+                  { type: 'section', text: { type: 'mrkdwn', text: summaryText } }
+                ], slackThread.slack_thread_ts);
+              } catch (e) {
+                console.error('[Team Member Syncs] Failed posting WhatsApp summary to Slack:', e.message);
+              }
+            }
+
+            const groupsOk = (addResult.missingGroupKeys || []).length === 0 &&
+              (addResult.groupResults || []).length > 0 &&
+              (addResult.groupResults || []).every(gr => gr?.result?.success);
+
+            if (groupsOk) {
+              await pool.query(`UPDATE team_members SET whatsapp_synced_at = NOW() WHERE id = $1`, [row.id]);
+              results.whatsapp.synced += 1;
+            } else {
+              errors.push('WhatsApp add failed (see Slack summary / missing group configuration)');
+              results.whatsapp.errors += 1;
+            }
+          }
+        } catch (e) {
+          errors.push(`WhatsApp error: ${e.message}`);
+          results.whatsapp.errors += 1;
+        }
+      }
+
+      // Monday sync
+      if (!row.monday_synced_at) {
+        try {
+          if (!ownerEmail) {
+            errors.push('Monday deferred: missing business owner email');
+            results.monday.deferred += 1;
+          } else {
+            const mondayResult = await syncTeamMembersToMonday([teamMember], ownerEmail, pool);
+
+            if (mondayResult?.notConfigured) {
+              console.log('[Team Member Syncs] Monday not configured; leaving pending for retry');
+              results.monday.deferred += 1;
+            } else if (mondayResult?.businessOwnerNotFound) {
+              console.log(`[Team Member Syncs] Business owner not found in Monday yet (${ownerEmail}); leaving pending for retry`);
+              results.monday.deferred += 1;
+            } else if ((mondayResult?.errors || []).length > 0) {
+              errors.push(`Monday failed: ${(mondayResult.errors || []).map(e => e?.error).filter(Boolean).join('; ') || 'error'}`);
+              results.monday.errors += 1;
+            } else {
+              await pool.query(`UPDATE team_members SET monday_synced_at = NOW() WHERE id = $1`, [row.id]);
+              results.monday.synced += 1;
+            }
+          }
+        } catch (e) {
+          errors.push(`Monday error: ${e.message}`);
+          results.monday.errors += 1;
+        }
+      }
+
+      // Persist last_sync_error (and record activity)
+      try {
+        await pool.query(
+          `UPDATE team_members SET last_sync_error = $2 WHERE id = $1`,
+          [row.id, errors.length > 0 ? errors.join(' | ') : null]
+        );
+
+        await pool.query(
+          `INSERT INTO activity_log (action, entity_type, entity_id, details)
+           VALUES ($1, $2, $3, $4)`,
+          [
+            errors.length > 0 ? 'team_member_sync_partial' : 'team_member_sync_complete',
+            'team_member',
+            row.id,
+            JSON.stringify({
+              team_member_email: teamMember.email,
+              team_member_name: teamMember.name,
+              business_owner_email: ownerEmail,
+              business_owner_name: ownerName,
+              remaining: {
+                circle: !row.circle_synced_at && errors.some(e => e.startsWith('Circle')) ? true : false,
+                whatsapp: !row.whatsapp_synced_at && errors.some(e => e.startsWith('WhatsApp')) ? true : false,
+                monday: !row.monday_synced_at && errors.some(e => e.startsWith('Monday')) ? true : false
+              },
+              errors
+            })
+          ]
+        );
+      } catch (e) {
+        console.error('[Team Member Syncs] Failed to persist sync status:', e.message);
+      }
+
+      if (errors.length > 0) {
+        results.errors.push({ team_member_id: row.id, email: teamMember.email, errors });
+      } else {
+        results.completed += 1;
+      }
+    }
+
+    res.json({ success: true, ...results });
+  } catch (error) {
+    console.error('[Team Member Syncs] Error:', error);
+    res.status(500).json({ error: 'Failed to process team member syncs' });
   }
 });
 

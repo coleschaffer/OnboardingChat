@@ -2009,6 +2009,77 @@ body {
     align-self: flex-end;
 }
 
+/* Add Team Member (Business Owner details) */
+.add-team-member {
+    margin-top: 16px;
+    padding: 12px;
+    border: 1px solid var(--gray-200);
+    border-radius: 10px;
+    background: var(--gray-50);
+}
+
+.add-team-member-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+.add-team-member-title {
+    margin: 0;
+    font-size: 0.9rem;
+    color: var(--gray-700);
+}
+
+.add-team-member-form {
+    display: none;
+}
+
+.add-team-member-form.active {
+    display: block;
+}
+
+.add-team-member-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+.add-team-member-grid input {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--gray-300);
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 0.9rem;
+    background: var(--white);
+}
+
+.add-team-member-grid input:focus {
+    outline: none;
+    border-color: var(--primary-orange);
+}
+
+.add-team-member-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.add-team-member-hint {
+    margin-top: 8px;
+    font-size: 0.8rem;
+    color: var(--gray-500);
+}
+
+@media (max-width: 700px) {
+    .add-team-member-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
 /* Status timestamp display */
 .status-with-time {
     display: flex;

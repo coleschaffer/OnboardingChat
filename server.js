@@ -448,6 +448,46 @@ async function runMigrations() {
       END $$
     `);
 
+    // Team member sync tracking (CRM-added team members get synced via cron)
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'team_members' AND column_name = 'sync_requested_at') THEN
+          ALTER TABLE team_members ADD COLUMN sync_requested_at TIMESTAMP WITH TIME ZONE;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'team_members' AND column_name = 'sync_attempts') THEN
+          ALTER TABLE team_members ADD COLUMN sync_attempts INTEGER DEFAULT 0;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'team_members' AND column_name = 'last_sync_attempt_at') THEN
+          ALTER TABLE team_members ADD COLUMN last_sync_attempt_at TIMESTAMP WITH TIME ZONE;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'team_members' AND column_name = 'last_sync_error') THEN
+          ALTER TABLE team_members ADD COLUMN last_sync_error TEXT;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'team_members' AND column_name = 'circle_synced_at') THEN
+          ALTER TABLE team_members ADD COLUMN circle_synced_at TIMESTAMP WITH TIME ZONE;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'team_members' AND column_name = 'whatsapp_synced_at') THEN
+          ALTER TABLE team_members ADD COLUMN whatsapp_synced_at TIMESTAMP WITH TIME ZONE;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'team_members' AND column_name = 'monday_synced_at') THEN
+          ALTER TABLE team_members ADD COLUMN monday_synced_at TIMESTAMP WITH TIME ZONE;
+        END IF;
+      END $$
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_team_members_sync_requested_at
+      ON team_members(sync_requested_at)
+      WHERE sync_requested_at IS NOT NULL
+    `);
+
     console.log('Database migrations completed');
   } catch (error) {
     console.error('Migration error:', error);
