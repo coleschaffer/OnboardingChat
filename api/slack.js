@@ -679,50 +679,97 @@ async function handleMemberLookupDM(pool, channelId, rawText) {
                 type: 'section',
                 text: {
                     type: 'mrkdwn',
-                    text: 'Send a member *first name*, *full name* (`First Last`), or *email* and I will return their Typeform data plus Onboarding Chat data when available.'
+                    text: 'Send a member *first name*, *full name* (`First Last`), or *email* and I will return the best available profile from Typeform, member database, SamCart, and Onboarding Chat.'
                 }
             }]
         );
         return;
     }
 
-    const matches = await findTypeformMatches(pool, query);
-    if (!matches.length) {
-        const queryText = query.type === 'email'
-            ? query.email
-            : [query.firstName, query.lastName].filter(Boolean).join(' ');
-        await postMessage(
-            channelId,
-            `No members found for "${queryText}".`,
-            [{
-                type: 'section',
-                text: {
-                    type: 'mrkdwn',
-                    text: `I couldn't find a Typeform member for *${escapeMrkdwn(queryText)}*. Try full name or email.`
-                }
-            }]
-        );
-        return;
-    }
+    const queryText = query.type === 'email'
+        ? query.email
+        : [query.firstName, query.lastName].filter(Boolean).join(' ');
 
-    if (matches.length > 1) {
+    const typeformMatches = await findTypeformMatches(pool, query);
+    if (typeformMatches.length > 1) {
         await postMessage(
             channelId,
             `Multiple members found for ${describeLookupQuery(query)}.`,
-            buildAmbiguousLookupBlocks(matches, query)
+            buildAmbiguousLookupBlocks(typeformMatches, query)
+        );
+        return;
+    }
+    if (typeformMatches.length === 1) {
+        const typeformRow = typeformMatches[0];
+        const onboardingContext = await getLatestOnboardingContext(pool, { email: typeformRow.email });
+        await postLookupBlocks(
+            channelId,
+            `Member lookup result for ${formatName(typeformRow.first_name, typeformRow.last_name)}`,
+            buildMemberLookupBlocks(typeformRow, onboardingContext)
         );
         return;
     }
 
-    const typeformRow = matches[0];
-    const onboardingContext = typeformRow.email
-        ? await getLatestOnboardingContextByEmail(pool, typeformRow.email)
-        : null;
+    const memberMatches = await findBusinessOwnerMatches(pool, query);
+    if (memberMatches.length > 1) {
+        await postMessage(
+            channelId,
+            `Multiple members found for ${describeLookupQuery(query)}.`,
+            buildAmbiguousLookupBlocks(memberMatches, query)
+        );
+        return;
+    }
+    if (memberMatches.length === 1) {
+        const memberRow = memberMatches[0];
+        const onboardingContext = await getLatestOnboardingContext(pool, {
+            businessOwnerId: memberRow.id,
+            email: memberRow.email
+        });
+        const samcartContext = await getLatestSamcartContext(pool, {
+            email: memberRow.email,
+            phone: memberRow.phone,
+            firstName: memberRow.first_name,
+            lastName: memberRow.last_name
+        });
+
+        await postLookupBlocks(
+            channelId,
+            `Member lookup result for ${formatName(memberRow.first_name, memberRow.last_name)}`,
+            buildBusinessOwnerLookupBlocks(memberRow, onboardingContext, samcartContext)
+        );
+        return;
+    }
+
+    const samcartMatches = await findSamcartMatches(pool, query);
+    if (samcartMatches.length > 1) {
+        await postMessage(
+            channelId,
+            `Multiple members found for ${describeLookupQuery(query)}.`,
+            buildAmbiguousLookupBlocks(samcartMatches, query)
+        );
+        return;
+    }
+    if (samcartMatches.length === 1) {
+        const samcartRow = samcartMatches[0];
+        const onboardingContext = await getLatestOnboardingContext(pool, { email: samcartRow.email });
+        await postLookupBlocks(
+            channelId,
+            `Member lookup result for ${formatName(samcartRow.first_name, samcartRow.last_name)}`,
+            buildSamcartLookupBlocks(samcartRow, onboardingContext)
+        );
+        return;
+    }
 
     await postMessage(
         channelId,
-        `Member lookup result for ${formatName(typeformRow.first_name, typeformRow.last_name)}`,
-        buildMemberLookupBlocks(typeformRow, onboardingContext)
+        `No members found for "${queryText}".`,
+        [{
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: `I couldn't find a member for *${escapeMrkdwn(queryText)}* in Typeform, member records, or SamCart. Try full name or email.`
+            }
+        }]
     );
 }
 
