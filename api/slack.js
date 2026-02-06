@@ -64,11 +64,90 @@ function formatName(firstName, lastName) {
     return full || 'Unknown';
 }
 
-function truncateText(value, maxLen = 220) {
-    const text = String(value || '').trim();
-    if (!text) return 'N/A';
-    if (text.length <= maxLen) return text;
-    return `${text.slice(0, maxLen - 1)}…`;
+function formatLookupValue(value) {
+    if (value === null || value === undefined) return 'N/A';
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        return trimmed || 'N/A';
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+        return String(value);
+    }
+
+    try {
+        const json = JSON.stringify(value, null, 2);
+        return json || 'N/A';
+    } catch {
+        return String(value || '').trim() || 'N/A';
+    }
+}
+
+function splitSlackTextChunks(value, maxLen = 2800) {
+    const text = formatLookupValue(value).replace(/\r\n/g, '\n');
+    if (text.length <= maxLen) return [text];
+
+    const chunks = [];
+    let remaining = text;
+
+    while (remaining.length > maxLen) {
+        let breakAt = remaining.lastIndexOf('\n', maxLen);
+        if (breakAt < Math.floor(maxLen * 0.5)) {
+            breakAt = remaining.lastIndexOf(' ', maxLen);
+        }
+        if (breakAt < Math.floor(maxLen * 0.5)) {
+            breakAt = maxLen;
+        }
+
+        const chunk = remaining.slice(0, breakAt).trim();
+        if (chunk) chunks.push(chunk);
+        remaining = remaining.slice(breakAt).trimStart();
+    }
+
+    if (remaining.trim()) chunks.push(remaining.trim());
+    return chunks.length ? chunks : ['N/A'];
+}
+
+function buildLookupFieldBlocks(fields) {
+    const blocks = [];
+
+    for (const field of fields) {
+        const chunks = splitSlackTextChunks(field.value);
+        for (let i = 0; i < chunks.length; i += 1) {
+            const label = i === 0 ? field.label : `${field.label} (cont.)`;
+            blocks.push({
+                type: 'section',
+                text: {
+                    type: 'mrkdwn',
+                    text: `*${escapeMrkdwn(label)}:*\n${escapeMrkdwn(chunks[i])}`
+                }
+            });
+        }
+    }
+
+    return blocks;
+}
+
+function chunkLookupBlocks(blocks, maxBlocksPerMessage = 45) {
+    if (!Array.isArray(blocks) || blocks.length === 0) return [];
+
+    const chunks = [];
+    for (let i = 0; i < blocks.length; i += maxBlocksPerMessage) {
+        chunks.push(blocks.slice(i, i + maxBlocksPerMessage));
+    }
+    return chunks;
+}
+
+async function postLookupBlocks(channelId, fallbackText, blocks) {
+    const chunks = chunkLookupBlocks(blocks);
+    if (!chunks.length) {
+        await postMessage(channelId, fallbackText);
+        return;
+    }
+
+    for (let i = 0; i < chunks.length; i += 1) {
+        const suffix = chunks.length > 1 ? ` (${i + 1}/${chunks.length})` : '';
+        await postMessage(channelId, `${fallbackText}${suffix}`, chunks[i]);
+    }
 }
 
 function formatDateTime(value) {
@@ -124,21 +203,56 @@ function describeLookupQuery(query) {
     return [query.firstName, query.lastName].filter(Boolean).join(' ').trim();
 }
 
-async function findTypeformMatches(pool, query) {
+function buildLookupWhereClause(query, tableAlias) {
+    const prefix = tableAlias ? `${tableAlias}.` : '';
     const params = [];
     let whereClause = '';
 
     if (query.type === 'email') {
-        whereClause = 'LOWER(ta.email) = LOWER($1)';
+        whereClause = `LOWER(${prefix}email) = LOWER($1)`;
         params.push(query.email);
     } else if (query.type === 'full_name') {
-        whereClause = 'LOWER(TRIM(ta.first_name)) = LOWER(TRIM($1)) AND LOWER(TRIM(ta.last_name)) = LOWER(TRIM($2))';
+        whereClause = `LOWER(TRIM(${prefix}first_name)) = LOWER(TRIM($1)) AND LOWER(TRIM(${prefix}last_name)) = LOWER(TRIM($2))`;
         params.push(query.firstName, query.lastName);
     } else {
-        whereClause = 'LOWER(TRIM(ta.first_name)) = LOWER(TRIM($1))';
+        whereClause = `LOWER(TRIM(${prefix}first_name)) = LOWER(TRIM($1))`;
         params.push(query.firstName);
     }
 
+    return { whereClause, params };
+}
+
+function normalizePhoneLast10(phone) {
+    const digits = String(phone || '').replace(/\D/g, '');
+    return digits.length >= 10 ? digits.slice(-10) : null;
+}
+
+function buildIdentityConditions(identity = {}, tableAlias = '') {
+    const prefix = tableAlias ? `${tableAlias}.` : '';
+    const conditions = [];
+    const params = [];
+
+    if (identity.email) {
+        conditions.push(`LOWER(${prefix}email) = LOWER($${params.length + 1})`);
+        params.push(identity.email);
+    }
+
+    const phoneLast10 = normalizePhoneLast10(identity.phone);
+    if (phoneLast10) {
+        conditions.push(`REPLACE(REPLACE(REPLACE(${prefix}phone, '-', ''), ' ', ''), '+', '') LIKE '%' || $${params.length + 1}`);
+        params.push(phoneLast10);
+    }
+
+    if (identity.firstName && identity.lastName) {
+        conditions.push(`(LOWER(TRIM(${prefix}first_name)) = LOWER(TRIM($${params.length + 1})) AND LOWER(TRIM(${prefix}last_name)) = LOWER(TRIM($${params.length + 2})))`);
+        params.push(identity.firstName, identity.lastName);
+    }
+
+    return { conditions, params };
+}
+
+async function findTypeformMatches(pool, query) {
+    const { whereClause, params } = buildLookupWhereClause(query, 'ta');
     const result = await pool.query(`
         WITH latest_per_email AS (
             SELECT DISTINCT ON (COALESCE(LOWER(ta.email), ta.id::text))
@@ -156,8 +270,57 @@ async function findTypeformMatches(pool, query) {
     return result.rows;
 }
 
-async function getLatestOnboardingContextByEmail(pool, email) {
-    if (!email) return null;
+async function findBusinessOwnerMatches(pool, query) {
+    const { whereClause, params } = buildLookupWhereClause(query, 'bo');
+    const result = await pool.query(`
+        WITH latest_per_email AS (
+            SELECT DISTINCT ON (COALESCE(LOWER(bo.email), bo.id::text))
+                bo.*
+            FROM business_owners bo
+            WHERE ${whereClause}
+            ORDER BY COALESCE(LOWER(bo.email), bo.id::text), bo.updated_at DESC, bo.created_at DESC
+        )
+        SELECT *
+        FROM latest_per_email
+        ORDER BY updated_at DESC NULLS LAST, created_at DESC
+        LIMIT 25
+    `, params);
+
+    return result.rows;
+}
+
+async function findSamcartMatches(pool, query) {
+    const { whereClause, params } = buildLookupWhereClause(query, 'so');
+    const result = await pool.query(`
+        WITH latest_per_email AS (
+            SELECT DISTINCT ON (COALESCE(LOWER(so.email), so.id::text))
+                so.*
+            FROM samcart_orders so
+            WHERE ${whereClause}
+            ORDER BY COALESCE(LOWER(so.email), so.id::text), so.created_at DESC
+        )
+        SELECT *
+        FROM latest_per_email
+        ORDER BY created_at DESC
+        LIMIT 25
+    `, params);
+
+    return result.rows;
+}
+
+async function getLatestOnboardingContext(pool, identity = {}) {
+    const filters = [];
+    const params = [];
+
+    if (identity.businessOwnerId) {
+        filters.push(`bo.id = $${params.length + 1}`);
+        params.push(identity.businessOwnerId);
+    }
+    if (identity.email) {
+        filters.push(`LOWER(bo.email) = LOWER($${params.length + 1})`);
+        params.push(identity.email);
+    }
+    if (!filters.length) return null;
 
     const result = await pool.query(`
         SELECT
@@ -184,9 +347,25 @@ async function getLatestOnboardingContextByEmail(pool, email) {
             ORDER BY created_at DESC
             LIMIT 1
         ) os ON true
-        WHERE LOWER(bo.email) = LOWER($1)
+        WHERE ${filters.join(' OR ')}
+        ORDER BY os.created_at DESC NULLS LAST, bo.updated_at DESC NULLS LAST, bo.created_at DESC
         LIMIT 1
-    `, [email]);
+    `, params);
+
+    return result.rows[0] || null;
+}
+
+async function getLatestSamcartContext(pool, identity = {}) {
+    const { conditions, params } = buildIdentityConditions(identity, 'so');
+    if (!conditions.length) return null;
+
+    const result = await pool.query(`
+        SELECT *
+        FROM samcart_orders so
+        WHERE ${conditions.join(' OR ')}
+        ORDER BY so.created_at DESC
+        LIMIT 1
+    `, params);
 
     return result.rows[0] || null;
 }
@@ -235,55 +414,66 @@ function buildAmbiguousLookupBlocks(matches, query) {
     ];
 }
 
+function buildOnboardingLookupBlocks(onboardingContext) {
+    if (!onboardingContext?.onboarding_submission_id) {
+        return [{
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: '_No Onboarding Chat submission found yet for this member._'
+            }
+        }];
+    }
+
+    const onboardingData = onboardingContext.onboarding_data || {};
+    const answers = onboardingData.answers || {};
+    const onboardingTeamMembers = Array.isArray(onboardingData.teamMembers) ? onboardingData.teamMembers.length : 0;
+    const onboardingPartners = Array.isArray(onboardingData.cLevelPartners) ? onboardingData.cLevelPartners.length : 0;
+    const statusLabel = onboardingContext.onboarding_is_complete ? 'Complete' : 'In Progress';
+
+    const onboardingFields = [
+        { label: 'Submission Status', value: `${statusLabel} (${onboardingContext.onboarding_progress || 0}% progress)` },
+        { label: 'Updated', value: formatDateTime(onboardingContext.onboarding_updated_at || onboardingContext.onboarding_created_at) },
+        { label: 'Business Name', value: answers.businessName || onboardingContext.bo_business_name || 'N/A' },
+        { label: 'Team Count', value: answers.teamCount || onboardingContext.bo_team_count || 'N/A' },
+        { label: 'Traffic Sources', value: answers.trafficSources || 'N/A' },
+        { label: 'Landing Pages', value: answers.landingPages || 'N/A' },
+        { label: 'Massive Win', value: answers.massiveWin || 'N/A' },
+        { label: 'AI Skill Level', value: answers.aiSkillLevel || 'N/A' },
+        { label: 'Bio', value: answers.bio || 'N/A' },
+        { label: 'Scheduled Call', value: answers.scheduleCall || 'N/A' },
+        { label: 'WhatsApp Joined', value: answers.whatsappJoined || (onboardingContext.bo_whatsapp_joined ? 'done' : 'N/A') },
+        { label: 'Team Members Added', value: onboardingTeamMembers },
+        { label: 'Partners Added', value: onboardingPartners }
+    ];
+
+    return buildLookupFieldBlocks(onboardingFields);
+}
+
 function buildMemberLookupBlocks(typeformRow, onboardingContext) {
     const typeformName = formatName(typeformRow.first_name, typeformRow.last_name);
     const sourceLabel = onboardingContext?.onboarding_submission_id ? 'Typeform + Onboarding Chat' : 'Typeform only';
     const typeformAnythingElse = typeformRow.anything_else || typeformRow.additional_info || '';
+    const onboardingBlocks = buildOnboardingLookupBlocks(onboardingContext);
 
-    const typeformLines = [
-        `*Name:* ${escapeMrkdwn(typeformName)}`,
-        `*Email:* ${escapeMrkdwn(typeformRow.email || 'N/A')}`,
-        `*Phone:* ${escapeMrkdwn(typeformRow.phone || 'N/A')}`,
-        `*Submitted:* ${escapeMrkdwn(formatDateTime(typeformRow.created_at))}`,
-        `*Best Way to Reach:* ${escapeMrkdwn(truncateText(typeformRow.contact_preference || 'N/A', 120))}`,
-        `*Business Description:* ${escapeMrkdwn(truncateText(typeformRow.business_description || 'N/A'))}`,
-        `*Annual Revenue:* ${escapeMrkdwn(truncateText(typeformRow.annual_revenue || 'N/A', 120))}`,
-        `*Revenue Trend:* ${escapeMrkdwn(truncateText(typeformRow.revenue_trend || 'N/A', 120))}`,
-        `*#1 Challenge:* ${escapeMrkdwn(truncateText(typeformRow.main_challenge || 'N/A'))}`,
-        `*Why CA Pro:* ${escapeMrkdwn(truncateText(typeformRow.why_ca_pro || 'N/A'))}`,
-        `*Investment Readiness:* ${escapeMrkdwn(truncateText(typeformRow.investment_readiness || 'N/A', 120))}`,
-        `*Decision Timeline:* ${escapeMrkdwn(truncateText(typeformRow.decision_timeline || 'N/A', 120))}`,
-        `*Has Team:* ${escapeMrkdwn(String(typeformRow.has_team || 'N/A'))}`,
-        `*Anything Else:* ${escapeMrkdwn(truncateText(typeformAnythingElse || 'N/A'))}`,
-        `*Referral Source:* ${escapeMrkdwn(truncateText(typeformRow.referral_source || 'N/A', 120))}`
+    const typeformFields = [
+        { label: 'Name', value: typeformName },
+        { label: 'Email', value: typeformRow.email || 'N/A' },
+        { label: 'Phone', value: typeformRow.phone || 'N/A' },
+        { label: 'Submitted', value: formatDateTime(typeformRow.created_at) },
+        { label: 'Best Way to Reach', value: typeformRow.contact_preference || 'N/A' },
+        { label: 'Business Description', value: typeformRow.business_description || 'N/A' },
+        { label: 'Annual Revenue', value: typeformRow.annual_revenue || 'N/A' },
+        { label: 'Revenue Trend', value: typeformRow.revenue_trend || 'N/A' },
+        { label: '#1 Challenge', value: typeformRow.main_challenge || 'N/A' },
+        { label: 'Why CA Pro', value: typeformRow.why_ca_pro || 'N/A' },
+        { label: 'Investment Readiness', value: typeformRow.investment_readiness || 'N/A' },
+        { label: 'Decision Timeline', value: typeformRow.decision_timeline || 'N/A' },
+        { label: 'Has Team', value: typeformRow.has_team ?? 'N/A' },
+        { label: 'Anything Else', value: typeformAnythingElse || 'N/A' },
+        { label: 'Referral Source', value: typeformRow.referral_source || 'N/A' }
     ];
-
-    let onboardingText = '_No Onboarding Chat submission found yet for this member._';
-    if (onboardingContext?.onboarding_submission_id) {
-        const onboardingData = onboardingContext.onboarding_data || {};
-        const answers = onboardingData.answers || {};
-        const onboardingTeamMembers = Array.isArray(onboardingData.teamMembers) ? onboardingData.teamMembers.length : 0;
-        const onboardingPartners = Array.isArray(onboardingData.cLevelPartners) ? onboardingData.cLevelPartners.length : 0;
-        const statusLabel = onboardingContext.onboarding_is_complete ? 'Complete' : 'In Progress';
-
-        const onboardingLines = [
-            `*Submission Status:* ${statusLabel} (${onboardingContext.onboarding_progress || 0}% progress)`,
-            `*Updated:* ${escapeMrkdwn(formatDateTime(onboardingContext.onboarding_updated_at || onboardingContext.onboarding_created_at))}`,
-            `*Business Name:* ${escapeMrkdwn(truncateText(answers.businessName || onboardingContext.bo_business_name || 'N/A', 120))}`,
-            `*Team Count:* ${escapeMrkdwn(String(answers.teamCount || onboardingContext.bo_team_count || 'N/A'))}`,
-            `*Traffic Sources:* ${escapeMrkdwn(truncateText(answers.trafficSources || 'N/A'))}`,
-            `*Landing Pages:* ${escapeMrkdwn(truncateText(answers.landingPages || 'N/A'))}`,
-            `*Massive Win:* ${escapeMrkdwn(truncateText(answers.massiveWin || 'N/A'))}`,
-            `*AI Skill Level:* ${escapeMrkdwn(String(answers.aiSkillLevel || 'N/A'))}`,
-            `*Bio:* ${escapeMrkdwn(truncateText(answers.bio || 'N/A'))}`,
-            `*Scheduled Call:* ${escapeMrkdwn(String(answers.scheduleCall || 'N/A'))}`,
-            `*WhatsApp Joined:* ${escapeMrkdwn(String(answers.whatsappJoined || (onboardingContext.bo_whatsapp_joined ? 'done' : 'N/A')))}`,
-            `*Team Members Added:* ${onboardingTeamMembers}`,
-            `*Partners Added:* ${onboardingPartners}`
-        ];
-
-        onboardingText = onboardingLines.join('\n');
-    }
+    const typeformBlocks = buildLookupFieldBlocks(typeformFields);
 
     return [
         {
@@ -305,7 +495,93 @@ function buildMemberLookupBlocks(typeformRow, onboardingContext) {
             type: 'section',
             text: {
                 type: 'mrkdwn',
-                text: `*📝 Typeform*\n${typeformLines.join('\n')}`
+                text: '*📝 Typeform*'
+            }
+        },
+        ...typeformBlocks,
+        { type: 'divider' },
+        {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: '*💬 Onboarding Chat*'
+            }
+        },
+        ...onboardingBlocks
+    ];
+}
+
+function buildBusinessOwnerLookupBlocks(memberRow, onboardingContext, samcartContext) {
+    const memberName = formatName(memberRow.first_name, memberRow.last_name);
+    const sourceLabel = onboardingContext?.onboarding_submission_id
+        ? 'Member Database + Onboarding Chat'
+        : 'Member Database only';
+    const onboardingBlocks = buildOnboardingLookupBlocks(onboardingContext);
+
+    const profileFields = [
+        { label: 'Name', value: memberName },
+        { label: 'Email', value: memberRow.email || 'N/A' },
+        { label: 'Phone', value: memberRow.phone || 'N/A' },
+        { label: 'Source', value: memberRow.source || 'N/A' },
+        { label: 'Onboarding Status', value: memberRow.onboarding_status || 'N/A' },
+        { label: 'Onboarding Progress', value: `${memberRow.onboarding_progress ?? 0}%` },
+        { label: 'Business Name', value: memberRow.business_name || 'N/A' },
+        { label: 'Business Overview', value: memberRow.business_overview || 'N/A' },
+        { label: 'Annual Revenue', value: memberRow.annual_revenue || 'N/A' },
+        { label: 'Team Count', value: memberRow.team_count || 'N/A' },
+        { label: 'Traffic Sources', value: memberRow.traffic_sources || 'N/A' },
+        { label: 'Landing Pages', value: memberRow.landing_pages || 'N/A' },
+        { label: 'Pain Point', value: memberRow.pain_point || 'N/A' },
+        { label: 'Massive Win', value: memberRow.massive_win || 'N/A' },
+        { label: 'AI Skill Level', value: memberRow.ai_skill_level || 'N/A' },
+        { label: 'Bio', value: memberRow.bio || 'N/A' },
+        { label: 'WhatsApp Number', value: memberRow.whatsapp_number || 'N/A' },
+        {
+            label: 'WhatsApp Joined',
+            value: memberRow.whatsapp_joined
+                ? `done${memberRow.whatsapp_joined_at ? ` (${formatDateTime(memberRow.whatsapp_joined_at)})` : ''}`
+                : 'not joined'
+        },
+        { label: 'Anything Else', value: memberRow.anything_else || 'N/A' },
+        { label: 'Created', value: formatDateTime(memberRow.created_at) },
+        { label: 'Updated', value: formatDateTime(memberRow.updated_at) }
+    ];
+    const profileBlocks = buildLookupFieldBlocks(profileFields);
+
+    let samcartBlocks = [{
+        type: 'section',
+        text: {
+            type: 'mrkdwn',
+            text: '_No SamCart order found for this member._'
+        }
+    }];
+    if (samcartContext) {
+        const samcartFields = [
+            { label: 'Order ID', value: samcartContext.samcart_order_id || samcartContext.id || 'N/A' },
+            { label: 'Email', value: samcartContext.email || 'N/A' },
+            { label: 'Phone', value: samcartContext.phone || 'N/A' },
+            { label: 'Product', value: samcartContext.product_name || 'N/A' },
+            { label: 'Total', value: samcartContext.order_total ? `${samcartContext.order_total} ${samcartContext.currency || 'USD'}` : 'N/A' },
+            { label: 'Status', value: samcartContext.status || 'N/A' },
+            { label: 'Created', value: formatDateTime(samcartContext.created_at) },
+            { label: 'Updated', value: formatDateTime(samcartContext.updated_at) }
+        ];
+        samcartBlocks = buildLookupFieldBlocks(samcartFields);
+    }
+
+    return [
+        {
+            type: 'header',
+            text: {
+                type: 'plain_text',
+                text: `Member Lookup: ${memberName}`
+            }
+        },
+        {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: `*Data Found:* ${sourceLabel}`
             }
         },
         { type: 'divider' },
@@ -313,9 +589,83 @@ function buildMemberLookupBlocks(typeformRow, onboardingContext) {
             type: 'section',
             text: {
                 type: 'mrkdwn',
-                text: `*💬 Onboarding Chat*\n${onboardingText}`
+                text: '*👤 Member Database*'
             }
-        }
+        },
+        ...profileBlocks,
+        { type: 'divider' },
+        {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: '*🧾 Latest SamCart Order*'
+            }
+        },
+        ...samcartBlocks,
+        { type: 'divider' },
+        {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: '*💬 Onboarding Chat*'
+            }
+        },
+        ...onboardingBlocks
+    ];
+}
+
+function buildSamcartLookupBlocks(samcartRow, onboardingContext) {
+    const memberName = formatName(samcartRow.first_name, samcartRow.last_name);
+    const sourceLabel = onboardingContext?.onboarding_submission_id
+        ? 'SamCart + Onboarding Chat'
+        : 'SamCart only';
+    const onboardingBlocks = buildOnboardingLookupBlocks(onboardingContext);
+    const samcartFields = [
+        { label: 'Name', value: memberName },
+        { label: 'Email', value: samcartRow.email || 'N/A' },
+        { label: 'Phone', value: samcartRow.phone || 'N/A' },
+        { label: 'Order ID', value: samcartRow.samcart_order_id || samcartRow.id || 'N/A' },
+        { label: 'Product', value: samcartRow.product_name || 'N/A' },
+        { label: 'Total', value: samcartRow.order_total ? `${samcartRow.order_total} ${samcartRow.currency || 'USD'}` : 'N/A' },
+        { label: 'Status', value: samcartRow.status || 'N/A' },
+        { label: 'Created', value: formatDateTime(samcartRow.created_at) },
+        { label: 'Updated', value: formatDateTime(samcartRow.updated_at) }
+    ];
+    const samcartBlocks = buildLookupFieldBlocks(samcartFields);
+
+    return [
+        {
+            type: 'header',
+            text: {
+                type: 'plain_text',
+                text: `Member Lookup: ${memberName}`
+            }
+        },
+        {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: `*Data Found:* ${sourceLabel}`
+            }
+        },
+        { type: 'divider' },
+        {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: '*🧾 SamCart*'
+            }
+        },
+        ...samcartBlocks,
+        { type: 'divider' },
+        {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: '*💬 Onboarding Chat*'
+            }
+        },
+        ...onboardingBlocks
     ];
 }
 

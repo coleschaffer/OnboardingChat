@@ -4,12 +4,21 @@ const API_BASE = '/api';
 const ADMIN_PASSWORD = '2323';
 
 // State
-let currentTab = 'overview';
+let currentTab = 'command-center';
 let applicationsPage = 0;
 let membersPage = 0;
 let teamMembersPage = 0;
 let cancellationsPage = 0;
 const pageSize = 20;
+const workspaceSectionDefaults = {
+    pipeline: 'pipeline-applications-section',
+    people: 'people-owners-section'
+};
+let workspaceSectionState = Object.keys(workspaceSectionDefaults).reduce((acc, workspace) => {
+    const saved = localStorage.getItem(`admin.workspace.${workspace}.section`);
+    acc[workspace] = saved || workspaceSectionDefaults[workspace];
+    return acc;
+}, {});
 
 // Monday-style board state (applications)
 let applicationsLastResponse = null;
@@ -104,10 +113,12 @@ function setupPasswordGate() {
 
 function initializeDashboard() {
     setupNavigation();
+    setupWorkspaceSwitchers();
+    setupWorkspaceSearch();
     setupSearch();
     setupFilters();
     setupImport();
-    loadOverview();
+    switchTab(currentTab);
 }
 
 // Initialize
@@ -143,28 +154,112 @@ function switchTab(tab) {
 
     // Load data
     switch (tab) {
-        case 'overview':
-            loadOverview();
+        case 'command-center':
+            loadCommandCenter();
             break;
-        case 'applications':
-            loadApplications();
+        case 'pipeline':
+            loadPipeline();
             break;
-        case 'members':
-            loadMembers();
+        case 'people':
+            loadPeople();
             break;
-        case 'team-members':
-            loadTeamMembers();
-            break;
-        case 'cancellations':
-            loadCancellations();
-            break;
-        case 'onboarding':
-            loadOnboarding();
-            break;
-        case 'import':
-            loadImportHistory();
+        case 'ops':
+            loadOps();
             break;
     }
+}
+
+function setupWorkspaceSwitchers() {
+    document.querySelectorAll('.workspace-switch-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const workspace = btn.dataset.workspace;
+            const target = btn.dataset.target;
+            setWorkspaceSection(workspace, target);
+        });
+    });
+
+    Object.entries(workspaceSectionState).forEach(([workspace, target]) => {
+        setWorkspaceSection(workspace, target);
+    });
+}
+
+function setWorkspaceSection(workspace, targetId) {
+    if (!workspace || !targetId) return;
+
+    const sections = Array.from(document.querySelectorAll(`[data-workspace-group="${workspace}"]`));
+    if (!sections.length) return;
+
+    const validTarget = sections.some(section => section.id === targetId)
+        ? targetId
+        : (workspaceSectionDefaults[workspace] || sections[0].id);
+
+    workspaceSectionState[workspace] = validTarget;
+    localStorage.setItem(`admin.workspace.${workspace}.section`, validTarget);
+
+    sections.forEach(section => {
+        section.classList.toggle('active', section.id === validTarget);
+    });
+
+    document.querySelectorAll(`.workspace-switch-btn[data-workspace="${workspace}"]`).forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.target === validTarget);
+    });
+}
+
+function setupWorkspaceSearch() {
+    const input = document.getElementById('workspace-search');
+    if (!input) return;
+
+    input.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        runWorkspaceSearch(input.value || '');
+    });
+}
+
+function runWorkspaceSearch(rawQuery) {
+    const query = (rawQuery || '').trim();
+    if (!query) return;
+
+    const setValue = (id) => {
+        const el = document.getElementById(id);
+        if (el) el.value = query;
+    };
+
+    setValue('applications-search');
+    setValue('members-search');
+    setValue('team-members-search');
+    setValue('submissions-search');
+    setValue('cancellations-search');
+
+    applicationsPage = 0;
+    membersPage = 0;
+    teamMembersPage = 0;
+    cancellationsPage = 0;
+
+    setWorkspaceSection('pipeline', 'pipeline-applications-section');
+    switchTab('pipeline');
+}
+
+function loadCommandCenter() {
+    loadOverview();
+    loadPriorityQueue();
+}
+
+function loadPipeline() {
+    setWorkspaceSection('pipeline', workspaceSectionState.pipeline || workspaceSectionDefaults.pipeline);
+    loadApplications();
+    loadOnboarding();
+}
+
+function loadPeople() {
+    setWorkspaceSection('people', workspaceSectionState.people || workspaceSectionDefaults.people);
+    loadMembers();
+    loadTeamMembers();
+}
+
+function loadOps() {
+    loadCancellations();
+    loadImportHistory();
 }
 
 // Search setup
@@ -263,6 +358,99 @@ async function loadOverview() {
     } catch (error) {
         console.error('Error loading overview:', error);
         showToast('Failed to load dashboard', 'error');
+    }
+}
+
+async function loadPriorityQueue() {
+    const queue = document.getElementById('priority-queue-list');
+    if (!queue) return;
+
+    queue.innerHTML = '<div class="loading">Loading...</div>';
+
+    try {
+        const data = await fetchAPI('/applications?limit=250&offset=0');
+        const apps = data.applications || [];
+
+        if (apps.length === 0) {
+            queue.innerHTML = '<p class="muted-inline">No applications yet.</p>';
+            return;
+        }
+
+        const now = Date.now();
+        const prioritized = apps
+            .map(app => {
+                const stage = app.display_status || 'new';
+                const statusAt = new Date(app.status_timestamp || app.created_at || 0).getTime();
+                const ageHours = Math.max(0, Math.round((now - statusAt) / (1000 * 60 * 60)));
+
+                let priority = 0;
+                let reason = 'Review profile';
+
+                if (stage === 'new') {
+                    priority = 100;
+                    reason = 'New Typeform application';
+                } else if (stage === 'emailed') {
+                    priority = 86;
+                    reason = 'Follow up on outbound email';
+                } else if (stage === 'replied') {
+                    priority = 78;
+                    reason = 'Reply received, next action needed';
+                } else if (stage === 'call_booked') {
+                    priority = 68;
+                    reason = 'Call booked, prep handoff';
+                } else if (stage === 'purchased') {
+                    priority = 74;
+                    reason = 'Purchased, awaiting onboarding progress';
+                } else if (stage === 'onboarding_started') {
+                    priority = ageHours >= 72 ? 96 : 62;
+                    reason = ageHours >= 72 ? 'Onboarding stalled for 72h+' : 'Onboarding in progress';
+                } else if (stage === 'onboarding_complete') {
+                    priority = 50;
+                    reason = 'Onboarding complete, confirm WhatsApp join';
+                } else if (stage === 'joined') {
+                    priority = 25;
+                    reason = 'Fully onboarded';
+                }
+
+                return {
+                    ...app,
+                    priority,
+                    reason,
+                    ageHours
+                };
+            })
+            .filter(item => item.priority >= 50)
+            .sort((a, b) => {
+                if (b.priority !== a.priority) return b.priority - a.priority;
+                return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
+            })
+            .slice(0, 8);
+
+        if (prioritized.length === 0) {
+            queue.innerHTML = '<p class="muted-inline">No urgent items right now.</p>';
+            return;
+        }
+
+        queue.innerHTML = prioritized.map(app => {
+            const stageInfo = formatDisplayStatus(app.display_status || 'new', app.status_timestamp);
+            const name = `${app.first_name || ''} ${app.last_name || ''}`.trim() || 'Unknown';
+            const staleText = app.ageHours >= 24 ? ` • ${app.ageHours}h` : '';
+            return `
+                <div class="priority-item">
+                    <div class="priority-main">
+                        <div class="priority-title">${escapeHtml(name)}</div>
+                        <div class="priority-meta">${escapeHtml(app.email || 'No email')} • ${escapeHtml(app.reason)}${escapeHtml(staleText)}</div>
+                    </div>
+                    <div class="priority-actions">
+                        <span class="status-badge ${app.display_status || 'new'}">${escapeHtml(stageInfo.text)}</span>
+                        <button class="btn btn-secondary btn-sm" type="button" onclick="viewApplication('${app.id}')">Open</button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    } catch (error) {
+        console.error('Error loading priority queue:', error);
+        queue.innerHTML = '<p class="muted-inline">Could not load priority queue.</p>';
     }
 }
 
@@ -735,6 +923,27 @@ function renderApplicationsTable() {
     tbody.innerHTML = rows.join('');
 }
 
+function renderPipelineSummaryCards(data) {
+    const container = document.getElementById('pipeline-summary-cards');
+    if (!container) return;
+
+    const statusCounts = data?.status_counts || {};
+    const cards = [
+        { label: 'Truly New', value: Number(data?.truly_new_count || 0), tone: 'new' },
+        { label: 'Reviewed', value: Number(statusCounts.reviewed || 0), tone: 'reviewed' },
+        { label: 'Approved', value: Number(statusCounts.approved || 0), tone: 'approved' },
+        { label: 'Rejected', value: Number(statusCounts.rejected || 0), tone: 'rejected' },
+        { label: 'Total Typeform', value: Number(data?.total || 0), tone: 'total' }
+    ];
+
+    container.innerHTML = cards.map(card => `
+        <div class="pipeline-summary-card ${card.tone}">
+            <div class="pipeline-summary-value">${card.value}</div>
+            <div class="pipeline-summary-label">${card.label}</div>
+        </div>
+    `).join('');
+}
+
 // Applications
 async function loadApplications() {
     const tbody = document.getElementById('applications-tbody');
@@ -753,6 +962,7 @@ async function loadApplications() {
 
         const data = await fetchAPI(`/applications?${params}`);
         applicationsLastResponse = data;
+        renderPipelineSummaryCards(data);
 
         initApplicationsTableUX();
         renderApplicationsTable();
@@ -2367,7 +2577,20 @@ function escapeHtml(text) {
 }
 
 function refreshStats() {
-    loadOverview();
+    if (currentTab === 'command-center') {
+        loadCommandCenter();
+    } else if (currentTab === 'pipeline') {
+        loadPipeline();
+        loadOverview();
+    } else if (currentTab === 'people') {
+        loadPeople();
+        loadOverview();
+    } else if (currentTab === 'ops') {
+        loadOps();
+        loadOverview();
+    } else {
+        loadOverview();
+    }
     showToast('Dashboard refreshed', 'success');
 }
 
