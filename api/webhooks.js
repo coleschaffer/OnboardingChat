@@ -448,6 +448,10 @@ function normalizeSamcartEventTypeForMatch(rawType) {
   return withSpaces.toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
+function normalizeSamcartStatus(rawStatus) {
+  return (rawStatus || '').toString().trim().toLowerCase();
+}
+
 function mapSubscriptionEventType(rawType) {
   const normalized = normalizeSamcartEventTypeForMatch(rawType);
   if (!normalized) return null;
@@ -469,6 +473,30 @@ function mapSubscriptionEventType(rawType) {
   return null;
 }
 
+function refineSubscriptionEventType(mappedType, rawStatus) {
+  const status = normalizeSamcartStatus(rawStatus);
+  // Only apply status-based hints when we already know this is a subscription-style event.
+  // (Otherwise, order webhooks with status="paid"/"completed" could be misclassified.)
+  if (!mappedType) return null;
+  if (!status) return mappedType;
+
+  // If the webhook type is vague ("subscription updated"), use status as a hint.
+  if (mappedType !== 'subscription_event') {
+    return mappedType;
+  }
+
+  if (status.includes('delinquent') || status.includes('past_due') || status.includes('past due') || status.includes('unpaid')) {
+    return 'delinquent';
+  }
+
+  if (status.includes('cancel')) return 'canceled';
+  if (status.includes('recover')) return 'recovered';
+  if (status.includes('success') || status.includes('succeed') || status.includes('charged') || status.includes('paid')) return 'charged';
+  if (status.includes('fail')) return 'charge_failed';
+
+  return mappedType;
+}
+
 function isOrderEventType(rawType) {
   const normalized = normalizeSamcartEventTypeForMatch(rawType);
   if (!normalized) return false;
@@ -482,24 +510,34 @@ function isOrderEventType(rawType) {
 
 function extractSamcartEmail(payload) {
   const customer = payload.customer || payload.customer_details || payload.subscription?.customer || payload.subscription?.customer_details || {};
-  return customer.email ||
+  const email =
+    customer.email ||
     payload.customer_email ||
     payload.email ||
     payload.subscription?.email ||
     payload.order?.customer_email ||
     payload.order?.email ||
     null;
+
+  if (!email) return null;
+  const trimmed = email.toString().trim();
+  return trimmed || null;
 }
 
 function extractSamcartPhone(payload) {
   const customer = payload.customer || payload.customer_details || payload.subscription?.customer || payload.subscription?.customer_details || {};
-  return customer.phone ||
+  const phone =
+    customer.phone ||
     payload.customer_phone ||
     payload.phone ||
     payload.subscription?.phone ||
     payload.order?.customer_phone ||
     payload.order?.phone ||
     null;
+
+  if (!phone) return null;
+  const trimmed = phone.toString().trim();
+  return trimmed || null;
 }
 
 function extractSamcartAmount(payload) {
@@ -529,6 +567,51 @@ function extractSamcartOrderId(payload) {
   return payload.order?.id || payload.order_id || payload.order?.order_id || null;
 }
 
+function parseSamcartTimestamp(value) {
+  if (value == null) return null;
+
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+
+  // Numeric timestamps: allow seconds or milliseconds.
+  const parseEpochNumber = (num) => {
+    if (!Number.isFinite(num)) return null;
+    // Heuristic: seconds are ~1e9-1e10; ms are ~1e12-1e13.
+    if (num > 1e12) return new Date(num);
+    if (num > 1e9) return new Date(num * 1000);
+    return new Date(num);
+  };
+
+  if (typeof value === 'number') {
+    const date = parseEpochNumber(value);
+    return date && !Number.isNaN(date.getTime()) ? date : null;
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+
+    // Unix timestamps often arrive as strings too.
+    if (/^\d+$/.test(trimmed)) {
+      const num = Number(trimmed);
+      const date = parseEpochNumber(num);
+      return date && !Number.isNaN(date.getTime()) ? date : null;
+    }
+
+    const date = new Date(trimmed);
+    return !Number.isNaN(date.getTime()) ? date : null;
+  }
+
+  // Fallback: try Date constructor on unknown types.
+  try {
+    const date = new Date(value);
+    return !Number.isNaN(date.getTime()) ? date : null;
+  } catch {
+    return null;
+  }
+}
+
 function extractSamcartEventTimestamp(payload) {
   const candidates = [
     payload.event_time,
@@ -538,9 +621,17 @@ function extractSamcartEventTimestamp(payload) {
     payload.event?.created_at
   ];
 
+  const now = Date.now();
+  const earliestAllowed = Date.UTC(2000, 0, 1);
+  const latestAllowed = now + 7 * 24 * 60 * 60 * 1000;
+
   for (const value of candidates) {
-    const date = new Date(value);
-    if (!Number.isNaN(date.getTime())) return date;
+    const date = parseSamcartTimestamp(value);
+    if (!date) continue;
+    const t = date.getTime();
+    // Guard against epoch-second parsing bugs sending us to 1970, or other implausible dates.
+    if (t < earliestAllowed || t > latestAllowed) continue;
+    return date;
   }
 
   return new Date();
@@ -583,18 +674,20 @@ async function recordSubscriptionEvent(pool, {
   periodKey,
   rawData
 }) {
-  const result = await pool.query(`
+  const normalizedEmail = email ? email.toString().trim().toLowerCase() : null;
+
+  const insertResult = await pool.query(`
     INSERT INTO samcart_subscription_events (
       event_key, event_type, email, period_key,
       subscription_id, order_id, amount, currency,
       status, occurred_at, raw_data
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
     ON CONFLICT (event_key) DO NOTHING
-    RETURNING id
+    RETURNING *
   `, [
     eventKey,
     eventType,
-    email,
+    normalizedEmail,
     periodKey,
     subscriptionId,
     orderId,
@@ -605,7 +698,173 @@ async function recordSubscriptionEvent(pool, {
     JSON.stringify(rawData || {})
   ]);
 
-  return result.rows[0]?.id || null;
+  if (insertResult.rows[0]) {
+    return { event: insertResult.rows[0], created: true };
+  }
+
+  // Duplicate delivery or repeated attempt. For charge_failed, SamCart can resend an identical payload
+  // across multiple payment retry attempts, so we treat a "duplicate" that arrives much later as a new attempt.
+  const latestResult = await pool.query(
+    `
+      SELECT *
+      FROM samcart_subscription_events
+      WHERE event_key = $1 OR event_key LIKE $2
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    [eventKey, `${eventKey}:attempt:%`]
+  );
+
+  const latest = latestResult.rows[0] || null;
+  if (!latest) return { event: null, created: false };
+
+  if (eventType === 'charge_failed') {
+    const lastCreated = latest.created_at ? new Date(latest.created_at) : null;
+    const now = new Date();
+    const lastTime = lastCreated && !Number.isNaN(lastCreated.getTime()) ? lastCreated.getTime() : 0;
+    const deltaMs = now.getTime() - lastTime;
+
+    // If we receive the same fingerprinted payload hours/days later, count it as a new retry attempt.
+    // This avoids "Attempt #1" forever when SamCart payloads don't include a unique attempt id/timestamp.
+    const ATTEMPT_GAP_MS = 6 * 60 * 60 * 1000; // 6 hours
+    if (deltaMs >= ATTEMPT_GAP_MS) {
+      const suffix = `${Math.floor(now.getTime() / 1000)}-${crypto.randomBytes(3).toString('hex')}`;
+      const attemptKey = `${eventKey}:attempt:${suffix}`.slice(0, 255);
+
+      const attemptInsert = await pool.query(
+        `
+          INSERT INTO samcart_subscription_events (
+            event_key, event_type, email, period_key,
+            subscription_id, order_id, amount, currency,
+            status, occurred_at, raw_data
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          ON CONFLICT (event_key) DO NOTHING
+          RETURNING *
+        `,
+        [
+          attemptKey,
+          eventType,
+          normalizedEmail,
+          periodKey,
+          subscriptionId,
+          orderId,
+          amount,
+          currency || 'USD',
+          status || null,
+          occurredAt,
+          JSON.stringify(rawData || {})
+        ]
+      );
+
+      if (attemptInsert.rows[0]) {
+        return { event: attemptInsert.rows[0], created: true };
+      }
+    }
+  }
+
+  return { event: latest, created: false };
+}
+
+async function markSubscriptionEventSlackNotified(pool, eventId) {
+  if (!pool || !eventId) return;
+  await pool.query(
+    `
+      UPDATE samcart_subscription_events
+      SET slack_notified = TRUE,
+          slack_notified_at = CURRENT_TIMESTAMP,
+          slack_error = NULL
+      WHERE id = $1
+    `,
+    [eventId]
+  );
+}
+
+async function markSubscriptionEventSlackError(pool, eventId, error) {
+  if (!pool || !eventId) return;
+  const message = (error && error.message) ? error.message : (error ? String(error) : null);
+  await pool.query(
+    `
+      UPDATE samcart_subscription_events
+      SET slack_notified = FALSE,
+          slack_notified_at = NULL,
+          slack_error = $2
+      WHERE id = $1
+    `,
+    [eventId, message]
+  );
+}
+
+function isSlackThreadMissingError(error) {
+  const message = (error && error.message) ? error.message : '';
+  return (
+    message.includes('thread_not_found') ||
+    message.includes('message_not_found') ||
+    message.includes('invalid_ts')
+  );
+}
+
+async function resetMemberThreadSlackPointers(pool, threadId) {
+  if (!pool || !threadId) return;
+  await pool.query(
+    'UPDATE member_threads SET slack_channel_id = NULL, slack_thread_ts = NULL WHERE id = $1',
+    [threadId]
+  );
+}
+
+async function ensureMemberThreadSlack(pool, createParams, expectedChannelId) {
+  const initialResult = await createMemberThread(pool, createParams);
+  let thread = initialResult?.thread || null;
+
+  if (!thread) return { thread: null };
+
+  // If the thread exists but is in the wrong channel, "move" by recreating the root message in the new channel.
+  if (
+    expectedChannelId &&
+    thread.slack_channel_id &&
+    thread.slack_channel_id !== expectedChannelId &&
+    thread.id
+  ) {
+    await resetMemberThreadSlackPointers(pool, thread.id);
+    const movedResult = await createMemberThread(pool, createParams);
+    thread = movedResult?.thread || thread;
+  }
+
+  return { thread };
+}
+
+async function postMessageToMemberThread(pool, thread, createParams, expectedChannelId, text, blocks) {
+  if (!thread?.slack_channel_id || !thread?.slack_thread_ts) {
+    throw new Error('Missing Slack thread identifiers');
+  }
+
+  // If we've changed channels for failures, ensure we're posting to the expected channel.
+  if (expectedChannelId && thread.slack_channel_id !== expectedChannelId && thread.id) {
+    await resetMemberThreadSlackPointers(pool, thread.id);
+    const ensured = await ensureMemberThreadSlack(pool, createParams, expectedChannelId);
+    thread = ensured.thread;
+    if (!thread?.slack_channel_id || !thread?.slack_thread_ts) {
+      throw new Error('Failed to re-create Slack thread in expected channel');
+    }
+  }
+
+  try {
+    await postMessage(thread.slack_channel_id, text, blocks, thread.slack_thread_ts);
+    return thread;
+  } catch (error) {
+    if (!isSlackThreadMissingError(error) || !thread?.id) throw error;
+
+    console.warn('[SamCart] Slack thread missing; re-creating thread and retrying post...');
+    await resetMemberThreadSlackPointers(pool, thread.id);
+    const repaired = await ensureMemberThreadSlack(pool, createParams, expectedChannelId);
+    const repairedThread = repaired.thread;
+
+    if (!repairedThread?.slack_channel_id || !repairedThread?.slack_thread_ts) {
+      throw error;
+    }
+
+    await postMessage(repairedThread.slack_channel_id, text, blocks, repairedThread.slack_thread_ts);
+    return repairedThread;
+  }
 }
 
 async function countSubscriptionFailures(pool, email, periodKey, since = null) {
@@ -613,13 +872,13 @@ async function countSubscriptionFailures(pool, email, periodKey, since = null) {
   let query = `
       SELECT COUNT(*)::int AS count
       FROM samcart_subscription_events
-      WHERE LOWER(email) = LOWER($1)
+      WHERE TRIM(LOWER(email)) = TRIM(LOWER($1))
         AND event_type = 'charge_failed'
-        AND period_key = $2
+        AND to_char(created_at AT TIME ZONE '${DEFAULT_TIMEZONE}', 'YYYY-MM') = $2
   `;
 
   if (since) {
-    query += ` AND occurred_at >= $3`;
+    query += ` AND created_at >= $3`;
     params.push(since);
   }
 
@@ -908,7 +1167,9 @@ router.post('/samcart', async (req, res) => {
 
     // SamCart sends different event types
     const eventType = payload.type || payload.event_type || payload.event?.type || payload.event?.event_type || payload.action || null;
-    const subscriptionEventType = mapSubscriptionEventType(eventType);
+    const mappedSubscriptionEventType = mapSubscriptionEventType(eventType);
+    const rawStatus = payload.status || payload.subscription?.status || payload.charge?.status || null;
+    const subscriptionEventType = refineSubscriptionEventType(mappedSubscriptionEventType, rawStatus);
 
     // Handle subscription events (monthly retries / cancellations)
     if (subscriptionEventType) {
@@ -920,13 +1181,14 @@ router.post('/samcart', async (req, res) => {
       const amount = extractSamcartAmount(payload);
       const subscriptionId = extractSamcartSubscriptionId(payload);
       const orderId = extractSamcartOrderId(payload);
-      const status = payload.status || payload.subscription?.status || payload.charge?.status || null;
+      const status = rawStatus;
+      const failureChannelId = process.env.CA_PRO_FAILED_SLACK_CHANNEL || process.env.CA_PRO_NOTIFICATIONS_SLACK_CHANNEL;
 
       if (!email) {
         console.warn('[SamCart] Subscription event missing email');
       }
 
-      const insertedId = await recordSubscriptionEvent(pool, {
+      const recordResult = await recordSubscriptionEvent(pool, {
         eventKey,
         eventType: subscriptionEventType,
         email,
@@ -940,8 +1202,12 @@ router.post('/samcart', async (req, res) => {
         rawData: payload
       });
 
-      if (!insertedId) {
-        return res.status(200).json({ success: true, duplicate: true });
+      const subscriptionEvent = recordResult?.event || null;
+      const wasCreated = Boolean(recordResult?.created);
+
+      // If SamCart retries delivery, we still want a chance to post Slack if we previously errored.
+      if (subscriptionEvent?.slack_notified) {
+        return res.status(200).json({ success: true, duplicate: !wasCreated, already_notified: true });
       }
 
       if (!email) {
@@ -953,207 +1219,258 @@ router.post('/samcart', async (req, res) => {
       const firstName = context.firstName || (context.displayName || '').split(' ')[0] || '';
       const displayName = context.displayName || email || 'Member';
 
-      if (subscriptionEventType === 'charge_failed') {
-        const existingThread = await getMemberThread(pool, email, 'monthly_bounce', periodKey);
-        let lastRecoveryAt = null;
-        if (existingThread?.metadata?.last_recovery_at) {
-          const parsed = new Date(existingThread.metadata.last_recovery_at);
-          if (!Number.isNaN(parsed.getTime())) {
-            lastRecoveryAt = parsed;
+      try {
+        if (subscriptionEventType === 'charge_failed') {
+          const existingThread = await getMemberThread(pool, email, 'monthly_bounce', periodKey);
+          let lastRecoveryAt = null;
+          if (existingThread?.metadata?.last_recovery_at) {
+            const parsed = new Date(existingThread.metadata.last_recovery_at);
+            if (!Number.isNaN(parsed.getTime())) {
+              lastRecoveryAt = parsed;
+            }
           }
-        }
-        const attemptCount = await countSubscriptionFailures(pool, email, periodKey, lastRecoveryAt);
-        const summaryText = `⚠️ Subscription Charge Failed (Attempt #${attemptCount})\n*Name:* ${displayName}\n*Email:* ${email || 'N/A'}\n*Amount:* ${amountLabel}`;
-        const summaryBlocks = [
-          {
-            type: 'section',
-            text: { type: 'mrkdwn', text: summaryText }
+          const attemptCount = await countSubscriptionFailures(pool, email, periodKey, lastRecoveryAt);
+          const summaryText = `⚠️ Subscription Charge Failed (Attempt #${attemptCount})\n*Name:* ${displayName}\n*Email:* ${email || 'N/A'}\n*Amount:* ${amountLabel}`;
+          const summaryBlocks = [
+            {
+              type: 'section',
+              text: { type: 'mrkdwn', text: summaryText }
+            }
+          ];
+
+          const threadCreateParams = {
+            email,
+            name: displayName,
+            threadType: 'monthly_bounce',
+            periodKey,
+            channelId: failureChannelId,
+            summaryText,
+            summaryBlocks,
+            metadata: { period_key: periodKey }
+          };
+
+          const ensured = await ensureMemberThreadSlack(pool, threadCreateParams, failureChannelId);
+          let thread = ensured.thread;
+
+          if (!thread?.slack_channel_id || !thread?.slack_thread_ts) {
+            throw new Error('Failed to create or load Slack thread for subscription failure');
           }
-        ];
 
-        const threadResult = await createMemberThread(pool, {
-          email,
-          name: displayName,
-          threadType: 'monthly_bounce',
-          periodKey,
-          channelId: process.env.CA_PRO_NOTIFICATIONS_SLACK_CHANNEL,
-          summaryText,
-          summaryBlocks,
-          metadata: { period_key: periodKey }
-        });
-
-        const thread = threadResult?.thread || null;
-
-        if (thread?.slack_channel_id && thread?.slack_thread_ts) {
           const attemptMessage = `Attempt #${attemptCount}: Charge failed — ${amountLabel}`;
-          await postMessage(thread.slack_channel_id, attemptMessage, [
+          thread = await postMessageToMemberThread(pool, thread, threadCreateParams, failureChannelId, attemptMessage, [
             { type: 'section', text: { type: 'mrkdwn', text: attemptMessage } }
-          ], thread.slack_thread_ts);
+          ]);
 
           if (attemptCount === 1) {
             const whatsappMessage = buildMonthlyBounceTemplate(firstName);
             const whatsappBlock = createWhatsAppCopyBlock(whatsappMessage);
-            await postMessage(thread.slack_channel_id, whatsappBlock.text, whatsappBlock.blocks, thread.slack_thread_ts);
+            thread = await postMessageToMemberThread(pool, thread, threadCreateParams, failureChannelId, whatsappBlock.text, whatsappBlock.blocks);
           }
+
+          if (attemptCount >= 4) {
+            const alreadyOffboarded = thread?.metadata?.offboarded_at;
+            const offboardResults = alreadyOffboarded ? null : await performOffboardingActions(pool, context, thread, 'delinquent');
+
+            if (offboardResults && thread?.slack_channel_id && thread?.slack_thread_ts) {
+              const summaryLines = [
+                `🚫 Subscription delinquent after attempt #${attemptCount} — offboarding triggered.`,
+                `• Monday BO status: ${offboardResults.monday?.success ? 'updated' : 'failed'}`,
+                `• Team members updated: ${offboardResults.teamMembers.filter(t => t.success).length}`,
+                `• Circle removals: ${offboardResults.circle?.removed || 0} (${offboardResults.circle?.errors?.length || 0} errors)`,
+                `• WhatsApp removals: ${offboardResults.wasender.filter(r => r.success).length}/${offboardResults.wasender.length} groups`
+              ];
+              thread = await postMessageToMemberThread(pool, thread, threadCreateParams, failureChannelId, summaryLines.join('\n'), [
+                { type: 'section', text: { type: 'mrkdwn', text: summaryLines.join('\n') } }
+              ]);
+
+              if (offboardResults.skippedPhones.length > 0) {
+                const skippedLines = offboardResults.skippedPhones.map(p => `• ${p.name || 'Unknown'} (${p.email || 'no email'})`);
+                const skippedText = `⚠️ Skipped WhatsApp removal (missing phone):\n${skippedLines.join('\n')}`;
+                thread = await postMessageToMemberThread(pool, thread, threadCreateParams, failureChannelId, skippedText, [
+                  { type: 'section', text: { type: 'mrkdwn', text: skippedText } }
+                ]);
+              }
+            }
+          }
+
+          await markSubscriptionEventSlackNotified(pool, subscriptionEvent?.id);
+
+          return res.status(200).json({ success: true, event: subscriptionEventType });
         }
 
-        if (attemptCount >= 4) {
+        if (subscriptionEventType === 'charged' || subscriptionEventType === 'recovered') {
+          const thread = await getMemberThread(pool, email, 'monthly_bounce', periodKey);
+          if (thread?.slack_channel_id && thread?.slack_thread_ts) {
+            const failures = await countSubscriptionFailures(pool, email, periodKey);
+            const metadata = thread.metadata || {};
+            if (failures > 0 && !metadata.recovery_posted_at) {
+              const recoveryText = `✅ Payment recovered after ${failures} failed attempt${failures === 1 ? '' : 's'} — ${amountLabel}`;
+              const threadCreateParams = {
+                email,
+                name: displayName,
+                threadType: 'monthly_bounce',
+                periodKey,
+                channelId: failureChannelId,
+                summaryText: recoveryText,
+                summaryBlocks: [{ type: 'section', text: { type: 'mrkdwn', text: recoveryText } }],
+                metadata: thread.metadata || { period_key: periodKey }
+              };
+
+              await postMessageToMemberThread(pool, thread, threadCreateParams, failureChannelId, recoveryText, [
+                { type: 'section', text: { type: 'mrkdwn', text: recoveryText } }
+              ]);
+
+              metadata.recovery_posted_at = new Date().toISOString();
+              metadata.last_recovery_at = metadata.recovery_posted_at;
+              await updateMemberThreadMetadata(pool, thread.id, metadata);
+            }
+          }
+
+          await markSubscriptionEventSlackNotified(pool, subscriptionEvent?.id);
+
+          return res.status(200).json({ success: true, event: subscriptionEventType });
+        }
+
+        if (subscriptionEventType === 'delinquent') {
+          const summaryText = `🚫 Subscription Delinquent\n*Name:* ${displayName}\n*Email:* ${email || 'N/A'}\n*Amount:* ${amountLabel}`;
+          const summaryBlocks = [
+            { type: 'section', text: { type: 'mrkdwn', text: summaryText } }
+          ];
+
+          const threadCreateParams = {
+            email,
+            name: displayName,
+            threadType: 'monthly_bounce',
+            periodKey,
+            channelId: failureChannelId,
+            summaryText,
+            summaryBlocks,
+            metadata: { period_key: periodKey }
+          };
+
+          const ensured = await ensureMemberThreadSlack(pool, threadCreateParams, failureChannelId);
+          let thread = ensured.thread;
+          if (!thread?.slack_channel_id || !thread?.slack_thread_ts) {
+            throw new Error('Failed to create or load Slack thread for subscription delinquent');
+          }
+
+          // Always log the delinquent transition in the thread, even if offboarding already ran.
+          const delinquentReply = `🚫 Subscription marked delinquent\n*Name:* ${displayName}\n*Email:* ${email || 'N/A'}\n*Amount:* ${amountLabel}`;
+          thread = await postMessageToMemberThread(pool, thread, threadCreateParams, failureChannelId, delinquentReply, [
+            { type: 'section', text: { type: 'mrkdwn', text: delinquentReply } }
+          ]);
+
           const alreadyOffboarded = thread?.metadata?.offboarded_at;
           const offboardResults = alreadyOffboarded ? null : await performOffboardingActions(pool, context, thread, 'delinquent');
 
           if (offboardResults && thread?.slack_channel_id && thread?.slack_thread_ts) {
             const summaryLines = [
-              `🚫 Subscription delinquent after attempt #${attemptCount} — offboarding triggered.`,
+              `🚫 Subscription delinquent — offboarding triggered.`,
               `• Monday BO status: ${offboardResults.monday?.success ? 'updated' : 'failed'}`,
               `• Team members updated: ${offboardResults.teamMembers.filter(t => t.success).length}`,
               `• Circle removals: ${offboardResults.circle?.removed || 0} (${offboardResults.circle?.errors?.length || 0} errors)`,
               `• WhatsApp removals: ${offboardResults.wasender.filter(r => r.success).length}/${offboardResults.wasender.length} groups`
             ];
-            await postMessage(thread.slack_channel_id, summaryLines.join('\n'), [
+            thread = await postMessageToMemberThread(pool, thread, threadCreateParams, failureChannelId, summaryLines.join('\n'), [
               { type: 'section', text: { type: 'mrkdwn', text: summaryLines.join('\n') } }
-            ], thread.slack_thread_ts);
+            ]);
 
             if (offboardResults.skippedPhones.length > 0) {
               const skippedLines = offboardResults.skippedPhones.map(p => `• ${p.name || 'Unknown'} (${p.email || 'no email'})`);
               const skippedText = `⚠️ Skipped WhatsApp removal (missing phone):\n${skippedLines.join('\n')}`;
-              await postMessage(thread.slack_channel_id, skippedText, [
+              thread = await postMessageToMemberThread(pool, thread, threadCreateParams, failureChannelId, skippedText, [
                 { type: 'section', text: { type: 'mrkdwn', text: skippedText } }
-              ], thread.slack_thread_ts);
+              ]);
             }
           }
+
+          await markSubscriptionEventSlackNotified(pool, subscriptionEvent?.id);
+
+          return res.status(200).json({ success: true, event: subscriptionEventType });
         }
 
-        return res.status(200).json({ success: true, event: subscriptionEventType });
-      }
-
-      if (subscriptionEventType === 'charged' || subscriptionEventType === 'recovered') {
-        const thread = await getMemberThread(pool, email, 'monthly_bounce', periodKey);
-        if (thread?.slack_channel_id && thread?.slack_thread_ts) {
-          const failures = await countSubscriptionFailures(pool, email, periodKey);
-          const metadata = thread.metadata || {};
-          if (failures > 0 && !metadata.recovery_posted_at) {
-            const recoveryText = `✅ Payment recovered after ${failures} failed attempt${failures === 1 ? '' : 's'} — ${amountLabel}`;
-            await postMessage(thread.slack_channel_id, recoveryText, [
-              { type: 'section', text: { type: 'mrkdwn', text: recoveryText } }
-            ], thread.slack_thread_ts);
-
-            metadata.recovery_posted_at = new Date().toISOString();
-            metadata.last_recovery_at = metadata.recovery_posted_at;
-            await updateMemberThreadMetadata(pool, thread.id, metadata);
-          }
-        }
-
-        return res.status(200).json({ success: true, event: subscriptionEventType });
-      }
-
-      if (subscriptionEventType === 'delinquent') {
-        const summaryText = `🚫 Subscription Delinquent\n*Name:* ${displayName}\n*Email:* ${email || 'N/A'}\n*Amount:* ${amountLabel}`;
-        const summaryBlocks = [
-          { type: 'section', text: { type: 'mrkdwn', text: summaryText } }
-        ];
-
-        const threadResult = await createMemberThread(pool, {
-          email,
-          name: displayName,
-          threadType: 'monthly_bounce',
-          periodKey,
-          channelId: process.env.CA_PRO_NOTIFICATIONS_SLACK_CHANNEL,
-          summaryText,
-          summaryBlocks,
-          metadata: { period_key: periodKey }
-        });
-
-        const thread = threadResult?.thread || null;
-        const alreadyOffboarded = thread?.metadata?.offboarded_at;
-        const offboardResults = alreadyOffboarded ? null : await performOffboardingActions(pool, context, thread, 'delinquent');
-
-        if (offboardResults && thread?.slack_channel_id && thread?.slack_thread_ts) {
-          const summaryLines = [
-            `🚫 Subscription delinquent — offboarding triggered.`,
-            `• Monday BO status: ${offboardResults.monday?.success ? 'updated' : 'failed'}`,
-            `• Team members updated: ${offboardResults.teamMembers.filter(t => t.success).length}`,
-            `• Circle removals: ${offboardResults.circle?.removed || 0} (${offboardResults.circle?.errors?.length || 0} errors)`,
-            `• WhatsApp removals: ${offboardResults.wasender.filter(r => r.success).length}/${offboardResults.wasender.length} groups`
+        if (subscriptionEventType === 'canceled') {
+          const cancelDateKey = getDateKeyInTimeZone(occurredAt, DEFAULT_TIMEZONE);
+          const summaryText = `🛑 Subscription Canceled\n*Name:* ${displayName}\n*Email:* ${email || 'N/A'}\n*Amount:* ${amountLabel}`;
+          const summaryBlocks = [
+            { type: 'section', text: { type: 'mrkdwn', text: summaryText } }
           ];
-          await postMessage(thread.slack_channel_id, summaryLines.join('\n'), [
-            { type: 'section', text: { type: 'mrkdwn', text: summaryLines.join('\n') } }
-          ], thread.slack_thread_ts);
 
-          if (offboardResults.skippedPhones.length > 0) {
-            const skippedLines = offboardResults.skippedPhones.map(p => `• ${p.name || 'Unknown'} (${p.email || 'no email'})`);
-            const skippedText = `⚠️ Skipped WhatsApp removal (missing phone):\n${skippedLines.join('\n')}`;
-            await postMessage(thread.slack_channel_id, skippedText, [
-              { type: 'section', text: { type: 'mrkdwn', text: skippedText } }
-            ], thread.slack_thread_ts);
-          }
-        }
-
-        return res.status(200).json({ success: true, event: subscriptionEventType });
-      }
-
-      if (subscriptionEventType === 'canceled') {
-        const cancelDateKey = getDateKeyInTimeZone(occurredAt, DEFAULT_TIMEZONE);
-        const summaryText = `🛑 Subscription Canceled\n*Name:* ${displayName}\n*Email:* ${email || 'N/A'}\n*Amount:* ${amountLabel}`;
-        const summaryBlocks = [
-          { type: 'section', text: { type: 'mrkdwn', text: summaryText } }
-        ];
-
-        const threadResult = await createMemberThread(pool, {
-          email,
-          name: displayName,
-          threadType: 'cancel',
-          periodKey: cancelDateKey,
-          channelId: process.env.CA_PRO_NOTIFICATIONS_SLACK_CHANNEL,
-          summaryText,
-          summaryBlocks,
-          metadata: { cancel_date: cancelDateKey }
-        });
-
-        const thread = threadResult?.thread || null;
-
-        await pool.query(
-          `
-            INSERT INTO cancellations (member_email, member_name, source, slack_channel_id, slack_thread_ts, member_thread_id)
-            VALUES ($1, $2, $3, $4, $5, $6)
-          `,
-          [
+          const threadCreateParams = {
             email,
-            displayName,
-            'samcart_webhook',
-            thread?.slack_channel_id || null,
-            thread?.slack_thread_ts || null,
-            thread?.id || null
-          ]
-        );
+            name: displayName,
+            threadType: 'cancel',
+            periodKey: cancelDateKey,
+            channelId: failureChannelId,
+            summaryText,
+            summaryBlocks,
+            metadata: { cancel_date: cancelDateKey }
+          };
 
-        const alreadyOffboarded = thread?.metadata?.offboarded_at;
-        const offboardResults = alreadyOffboarded ? null : await performOffboardingActions(pool, context, thread, 'canceled');
-
-        if (offboardResults && thread?.slack_channel_id && thread?.slack_thread_ts) {
-          const summaryLines = [
-            `🛑 Cancellation received — offboarding triggered.`,
-            `• Monday BO status: ${offboardResults.monday?.success ? 'updated' : 'failed'}`,
-            `• Team members updated: ${offboardResults.teamMembers.filter(t => t.success).length}`,
-            `• Circle removals: ${offboardResults.circle?.removed || 0} (${offboardResults.circle?.errors?.length || 0} errors)`,
-            `• WhatsApp removals: ${offboardResults.wasender.filter(r => r.success).length}/${offboardResults.wasender.length} groups`
-          ];
-          await postMessage(thread.slack_channel_id, summaryLines.join('\n'), [
-            { type: 'section', text: { type: 'mrkdwn', text: summaryLines.join('\n') } }
-          ], thread.slack_thread_ts);
-
-          if (offboardResults.skippedPhones.length > 0) {
-            const skippedLines = offboardResults.skippedPhones.map(p => `• ${p.name || 'Unknown'} (${p.email || 'no email'})`);
-            const skippedText = `⚠️ Skipped WhatsApp removal (missing phone):\n${skippedLines.join('\n')}`;
-            await postMessage(thread.slack_channel_id, skippedText, [
-              { type: 'section', text: { type: 'mrkdwn', text: skippedText } }
-            ], thread.slack_thread_ts);
+          const ensured = await ensureMemberThreadSlack(pool, threadCreateParams, failureChannelId);
+          let thread = ensured.thread;
+          if (!thread?.slack_channel_id || !thread?.slack_thread_ts) {
+            throw new Error('Failed to create or load Slack thread for subscription canceled');
           }
+
+          // Always post at least one reply so we can detect deleted threads and repair.
+          const cancelReply = `🛑 Subscription cancellation received\n*Name:* ${displayName}\n*Email:* ${email || 'N/A'}\n*Amount:* ${amountLabel}`;
+          thread = await postMessageToMemberThread(pool, thread, threadCreateParams, failureChannelId, cancelReply, [
+            { type: 'section', text: { type: 'mrkdwn', text: cancelReply } }
+          ]);
+
+          await pool.query(
+            `
+              INSERT INTO cancellations (member_email, member_name, source, slack_channel_id, slack_thread_ts, member_thread_id)
+              SELECT $1, $2, $3, $4, $5, $6
+              WHERE NOT EXISTS (
+                SELECT 1 FROM cancellations WHERE member_thread_id = $6
+              )
+            `,
+            [
+              email,
+              displayName,
+              'samcart_webhook',
+              thread?.slack_channel_id || null,
+              thread?.slack_thread_ts || null,
+              thread?.id || null
+            ]
+          );
+
+          const alreadyOffboarded = thread?.metadata?.offboarded_at;
+          const offboardResults = alreadyOffboarded ? null : await performOffboardingActions(pool, context, thread, 'canceled');
+
+          if (offboardResults && thread?.slack_channel_id && thread?.slack_thread_ts) {
+            const summaryLines = [
+              `🛑 Cancellation received — offboarding triggered.`,
+              `• Monday BO status: ${offboardResults.monday?.success ? 'updated' : 'failed'}`,
+              `• Team members updated: ${offboardResults.teamMembers.filter(t => t.success).length}`,
+              `• Circle removals: ${offboardResults.circle?.removed || 0} (${offboardResults.circle?.errors?.length || 0} errors)`,
+              `• WhatsApp removals: ${offboardResults.wasender.filter(r => r.success).length}/${offboardResults.wasender.length} groups`
+            ];
+            thread = await postMessageToMemberThread(pool, thread, threadCreateParams, failureChannelId, summaryLines.join('\n'), [
+              { type: 'section', text: { type: 'mrkdwn', text: summaryLines.join('\n') } }
+            ]);
+
+            if (offboardResults.skippedPhones.length > 0) {
+              const skippedLines = offboardResults.skippedPhones.map(p => `• ${p.name || 'Unknown'} (${p.email || 'no email'})`);
+              const skippedText = `⚠️ Skipped WhatsApp removal (missing phone):\n${skippedLines.join('\n')}`;
+              thread = await postMessageToMemberThread(pool, thread, threadCreateParams, failureChannelId, skippedText, [
+                { type: 'section', text: { type: 'mrkdwn', text: skippedText } }
+              ]);
+            }
+          }
+
+          await markSubscriptionEventSlackNotified(pool, subscriptionEvent?.id);
+
+          return res.status(200).json({ success: true, event: subscriptionEventType });
         }
 
         return res.status(200).json({ success: true, event: subscriptionEventType });
+      } catch (handlingError) {
+        await markSubscriptionEventSlackError(pool, subscriptionEvent?.id, handlingError);
+        throw handlingError;
       }
-
-      return res.status(200).json({ success: true, event: subscriptionEventType });
     }
 
     const isOrderEvent = isOrderEventType(eventType);

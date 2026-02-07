@@ -305,6 +305,25 @@ async function runMigrations() {
       END $$;
     `);
 
+    // Track whether we've successfully notified Slack for a given subscription event.
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'samcart_subscription_events' AND column_name = 'slack_notified') THEN
+          ALTER TABLE samcart_subscription_events ADD COLUMN slack_notified BOOLEAN DEFAULT FALSE;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'samcart_subscription_events' AND column_name = 'slack_notified_at') THEN
+          ALTER TABLE samcart_subscription_events ADD COLUMN slack_notified_at TIMESTAMP WITH TIME ZONE;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'samcart_subscription_events' AND column_name = 'slack_error') THEN
+          ALTER TABLE samcart_subscription_events ADD COLUMN slack_error TEXT;
+        END IF;
+      END $$;
+    `);
+
     // Cancellations table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS cancellations (
